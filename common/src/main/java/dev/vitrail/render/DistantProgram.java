@@ -1,6 +1,7 @@
 package dev.vitrail.render;
 
 import dev.vitrail.dh.DhLods;
+import dev.vitrail.api.render.DistantTerrainRenderer;
 import dev.vitrail.glsl.DistantVertex;
 import dev.vitrail.glsl.PackProgram;
 import dev.vitrail.pack.target.ChainPlan;
@@ -205,7 +206,7 @@ final class DistantProgram extends FamilyProgram {
 		// Without DH standing, nothing ever draws these. And measured on a bench without that
 		// mod, the two dh programs also refused shaderc outright, so compiling ahead here bought
 		// nothing but refusal lines for programs no frame would ever ask for.
-		if (!DhLods.usable()) {
+		if (!DhLods.usable() && !DistantTerrainRenderer.hasProviders()) {
 			return false;
 		}
 

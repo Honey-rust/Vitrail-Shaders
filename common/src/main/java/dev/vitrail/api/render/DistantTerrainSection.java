@@ -19,9 +19,18 @@ public record DistantTerrainSection(int x, int y, int z, List<Piece> pieces) {
         pieces = List.copyOf(pieces);
     }
 
-    /** One indexed opaque or translucent mesh belonging to this section. */
-    public record Piece(GpuBuffer vertices, GpuBuffer indices, int indexCount) {
+    /**
+     * One indexed opaque or translucent mesh belonging to this section.
+     * Optional detail vertices have stride 16: float UV at 0, uint tile at 8, RGBA8 average at 12.
+     * The atlas holds 16x16 texel tiles in 16 columns and 96 rows. Providers own both resources.
+     */
+    public record Piece(GpuBuffer vertices, GpuBuffer indices, int indexCount,
+                        GpuBuffer detail, com.mojang.blaze3d.textures.GpuTextureView atlas) {
+        public Piece(GpuBuffer vertices, GpuBuffer indices, int indexCount) {
+            this(vertices, indices, indexCount, null, null);
+        }
         public Piece {
+            if ((detail == null) != (atlas == null)) throw new IllegalArgumentException("Detail buffer and atlas must be supplied together");
             if (vertices == null || indices == null) {
                 throw new NullPointerException("Distant terrain buffers must not be null");
             }

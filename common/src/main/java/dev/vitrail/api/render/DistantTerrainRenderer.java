@@ -52,6 +52,9 @@ public final class DistantTerrainRenderer {
         // Sodium is called again for shadow maps. Those callbacks must neither collect
         // camera meshes nor write camera colour targets; DistantDraw.shadow owns that pass.
         if (dev.vitrail.render.TerrainDraw.drawingShadow()) return false;
+        boolean plain = DistantDraw.usesPlainRenderer();
+        if (plain && !opaque) return false; // Both LOD layers run before vanilla terrain.
+        List<DistantTerrainSection> water = new ArrayList<>();
         List<DistantTerrainSection> all = new ArrayList<>(sections);
         for (DistantTerrainProvider provider : PROVIDERS) {
             try {
@@ -59,11 +62,17 @@ public final class DistantTerrainRenderer {
                 if (counters != null) counters.incrementAndGet(opaque ? 0 : 1);
                 List<DistantTerrainSection> provided = provider.getSections(opaque);
                 if (provided != null && !provided.isEmpty()) all.addAll(provided);
+                if (plain) {
+                    List<DistantTerrainSection> transparent = provider.getSections(false);
+                    if (transparent != null) water.addAll(transparent);
+                }
             } catch (RuntimeException | LinkageError e) {
                 Vitrail.logger().error("A distant terrain provider failed to supply meshes", e);
             }
         }
-        return DistantDraw.draw(opaque, List.copyOf(all));
+        boolean drawn = DistantDraw.draw(opaque, List.copyOf(all));
+        if (plain) drawn = DistantDraw.draw(false, List.copyOf(water)) || drawn;
+        return drawn;
     }
 
     /**

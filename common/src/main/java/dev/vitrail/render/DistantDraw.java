@@ -433,6 +433,9 @@ public final class DistantDraw extends FamilyDraw {
 		this.targets = targets;
 	}
 
+	/** Returns whether the shader-pack-independent terrain renderer is selected. */
+	public static boolean usesPlainRenderer() { return PackChain.distant() == null; }
+
 	/**
 	 * Draws one half of the far terrain with the pack's own program.
 	 * <p>
@@ -444,6 +447,7 @@ public final class DistantDraw extends FamilyDraw {
 	 * @param sections every section of the far terrain, in the order DH listed them
 	 * @return whether the pack really drew it
 	 */
+
 	public static boolean draw(boolean opaque, List<DistantTerrainSection> sections) {
 		if (TerrainDraw.drawingShadow()) return false;
 		DistantDraw draw = PackChain.distant();
