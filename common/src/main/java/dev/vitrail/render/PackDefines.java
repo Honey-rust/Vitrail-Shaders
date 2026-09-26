@@ -1,6 +1,7 @@
 package dev.vitrail.render;
 
 import dev.vitrail.dh.DhDepth;
+import dev.vitrail.api.render.DistantTerrainRenderer;
 import dev.vitrail.pack.option.EngineDefines;
 import dev.vitrail.render.pbr.PbrAtlases;
 import dev.vitrail.uniform.BiomeCategory;
@@ -78,7 +79,7 @@ public final class PackDefines {
 	 */
 	public static void settle() {
 		installed = stamp();
-		distant = DhDepth.present();
+		distant = farTerrainAvailable();
 		format = PbrAtlases.format();
 	}
 
@@ -124,7 +125,7 @@ public final class PackDefines {
 	 * every frame.
 	 */
 	public static boolean distantHorizonsMoved() {
-		return DhDepth.present() != distant;
+		return farTerrainAvailable() != distant;
 	}
 
 	private static long stamp() {
@@ -156,8 +157,12 @@ public final class PackDefines {
 		// same answer the reduction and the sampler already run on: a pack told one thing and a
 		// specular map reduced under another would be two conventions in one picture.
 		return new EngineDefines.Environment(EngineDefines.DEFAULT_MC_VERSION, os(), vendor,
-				renderer, mipmap, DhDepth.present(), biomeIds(), categories(), PbrAtlases.format(),
+				renderer, mipmap, farTerrainAvailable(), biomeIds(), categories(), PbrAtlases.format(),
 				BufferBlending.served());
+	}
+
+	private static boolean farTerrainAvailable() {
+		return DhDepth.present() || DistantTerrainRenderer.hasProviders();
 	}
 
 	private static Map<String, Integer> biomeIds() {

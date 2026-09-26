@@ -1,6 +1,6 @@
 package dev.vitrail.render;
 
-import dev.vitrail.dh.DhLods;
+import dev.vitrail.api.render.DistantTerrainSection;
 import dev.vitrail.glsl.DistantVertex;
 import dev.vitrail.glsl.PackProgram;
 import dev.vitrail.glsl.VertexInputs;
@@ -58,6 +58,7 @@ import java.util.Map;
 import java.util.Optional;
 import java.util.OptionalDouble;
 import java.util.Set;
+import java.util.stream.Collectors;
 
 /**
  * Draws Distant Horizons' far terrain with the pack's own programs, where DH would have drawn it
@@ -124,7 +125,12 @@ public final class DistantDraw extends FamilyDraw {
 	 *                governs its own chunk group, and this family is drawn inside them for that
 	 *                reason
 	 */
-	public record Element(String element, String program, boolean water, boolean shadow) {
+	public record Element(String element, String program, boolean water, boolean shadow,
+			boolean terrainFallback) {
+
+		public Element(String element, String program, boolean water, boolean shadow) {
+			this(element, program, water, shadow, false);
+		}
 
 		/** What the pack has to be read for to serve this half, in terms the translation knows. */
 		private PackProgram.GeometryElement asked() {
@@ -294,6 +300,8 @@ public final class DistantDraw extends FamilyDraw {
 
 	/** One program per half the pack serves. Empty until the pack has been read. */
 	private final Map<String, DistantProgram> programs = new LinkedHashMap<>();
+	/** The pack's DH programs, or terrain programs used when it ships no DH entry point. */
+	private Map<String, Element> activeElements = Map.of();
 
 	/** The elements of DH's mesh those programs declare, which is what the format is built from. */
 	private List<String> carried = List.of();
@@ -388,8 +396,8 @@ public final class DistantDraw extends FamilyDraw {
 	private static final Occlusion OCCLUSION = new Occlusion();
 
 	/** What DH has handed over on the frame being drawn, one list per half of its geometry. */
-	private List<DhLods.Section> opaqueSections = List.of();
-	private List<DhLods.Section> waterSections = List.of();
+	private List<DistantTerrainSection> opaqueSections = List.of();
+	private List<DistantTerrainSection> waterSections = List.of();
 
 	/**
 	 * The same two once the frame has closed, which is what the light draws.
@@ -399,8 +407,8 @@ public final class DistantDraw extends FamilyDraw {
 	 * nothing over leaves these empty and the light draws no far terrain rather than the last one
 	 * it saw.
 	 */
-	private List<DhLods.Section> shadowOpaque = List.of();
-	private List<DhLods.Section> shadowWater = List.of();
+	private List<DistantTerrainSection> shadowOpaque = List.of();
+	private List<DistantTerrainSection> shadowWater = List.of();
 
 	/**
 	 * Whether the light's own two halves have stopped for the load, which is latched apart from
@@ -436,8 +444,10 @@ public final class DistantDraw extends FamilyDraw {
 	 * @param sections every section of the far terrain, in the order DH listed them
 	 * @return whether the pack really drew it
 	 */
-	public static boolean draw(boolean opaque, List<DhLods.Section> sections) {
+	public static boolean draw(boolean opaque, List<DistantTerrainSection> sections) {
+		if (TerrainDraw.drawingShadow()) return false;
 		DistantDraw draw = PackChain.distant();
+		if (draw == null) return PlainDistantDraw.draw(opaque, sections);
 		GpuDevice device = RenderSystem.tryGetDevice();
 		Minecraft minecraft = Minecraft.getInstance();
 		if (draw == null || draw.broken || device == null || minecraft == null || sections.isEmpty()) {
@@ -454,7 +464,8 @@ public final class DistantDraw extends FamilyDraw {
 		}
 
 		try {
-			return draw.record(device, minecraft, ELEMENTS.get(key(!opaque, false)), sections);
+			Element element = draw.activeElements.get(key(!opaque, false));
+			return element != null && draw.record(device, minecraft, element, sections);
 		} catch (GpuDeviceLossException e) {
 			throw e;
 		} catch (RuntimeException e) {
@@ -507,8 +518,10 @@ public final class DistantDraw extends FamilyDraw {
 		}
 
 		try {
-			draw.recordShadow(device, ELEMENTS.get(key(water, true)),
-					water ? draw.shadowWater : draw.shadowOpaque, camera);
+			Element element = draw.activeElements.get(key(water, true));
+			if (element != null) {
+				draw.recordShadow(device, element, water ? draw.shadowWater : draw.shadowOpaque, camera);
+			}
 		} catch (GpuDeviceLossException e) {
 			throw e;
 		} catch (RuntimeException e) {
@@ -658,7 +671,7 @@ public final class DistantDraw extends FamilyDraw {
 	 * second time and empty targets holding the picture the player is looking at.
 	 * {@code TerrainDraw.openShadowStage} has already made the map exist and emptied it.
 	 */
-	private void recordShadow(GpuDevice device, Element element, List<DhLods.Section> sections,
+	private void recordShadow(GpuDevice device, Element element, List<DistantTerrainSection> sections,
 			Vec3 camera) {
 		// Never read from here. The reading opens the pack and expands every include of it, which is
 		// not something to do inside the light's own stage; the camera's own halves read at the
@@ -711,7 +724,7 @@ public final class DistantDraw extends FamilyDraw {
 				pass.setUniform(DistantVertex.SECTION_BLOCK,
 						SHADOW_CORNERS.slot(device, base + index));
 
-				for (DhLods.Piece piece : sections.get(index).pieces()) {
+				for (DistantTerrainSection.Piece piece : sections.get(index).pieces()) {
 					// Asked again here and not only where the section was taken, which is the one
 					// thing this half owes to being a frame's width away from its own capture: these
 					// are DH's buffers and DH is free to have closed one between its pass and this
@@ -744,7 +757,7 @@ public final class DistantDraw extends FamilyDraw {
 	}
 
 	private boolean record(GpuDevice device, Minecraft minecraft, Element element,
-			List<DhLods.Section> sections) {
+			List<DistantTerrainSection> sections) {
 		if (!this.read) {
 			return false;
 		}
@@ -873,7 +886,7 @@ public final class DistantDraw extends FamilyDraw {
 			for (int index = 0; index < sections.size(); index++) {
 				pass.setUniform(DistantVertex.SECTION_BLOCK, CORNERS.slot(device, base + index));
 
-				for (DhLods.Piece piece : sections.get(index).pieces()) {
+				for (DistantTerrainSection.Piece piece : sections.get(index).pieces()) {
 					// The shadow half's guard, asked here for what it says as much as for what
 					// it spares. The capture looks at the vertex buffer alone and nothing has
 					// ever looked at the index one, so a piece whose index buffer DH closed
@@ -1092,12 +1105,28 @@ public final class DistantDraw extends FamilyDraw {
 					? PackProgram.loadDistant(shared, this.place, names)
 					: PackProgram.loadDistant(this.packPath, this.place, names, this.chosen, this.profile);
 			if (distant.programs().isEmpty()) {
-				Vitrail.logger().info("{} serves nothing in {} for the far terrain, so Distant "
-						+ "Horizons keeps drawing it with its own shader", this.packPath.getFileName(),
-						this.place.isEmpty() ? "its root" : this.place);
-
-				return;
+				// Packs such as Bliss do not ship dh_terrain at all. Use their ordinary terrain
+				// programs as the shader entry points instead: the distant mesh still supplies averaged
+				// face colour, light, normal and DH material, while the absent texture coordinates are
+				// answered with the neutral atlas as on the native DH path.
+				asked = List.of(new Element("distant", "gbuffers_terrain", false, false, true),
+						new Element("distant_water", "gbuffers_water", true, false, true));
+				names = asked.stream().map(Element::asked).toList();
+				distant = shared != null
+						? PackProgram.loadDistant(shared, this.place, names)
+						: PackProgram.loadDistant(this.packPath, this.place, names, this.chosen, this.profile);
+				if (distant.programs().isEmpty()) {
+					Vitrail.logger().info("{} serves no far-terrain or terrain shader in {}; registered "
+							+ "distant-terrain meshes cannot be drawn for this pack",
+							this.packPath.getFileName(), this.place.isEmpty() ? "its root" : this.place);
+					return;
+				}
+				Vitrail.logger().info("{} has no far-terrain shader in {}; Vitrail will draw registered "
+						+ "distant-terrain meshes with the pack's terrain programs",
+						this.packPath.getFileName(), this.place.isEmpty() ? "its root" : this.place);
 			}
+			this.activeElements = asked.stream().collect(Collectors.toUnmodifiableMap(
+					Element::element, element -> element));
 
 			this.carried = distant.carried();
 			for (Element element : asked) {
@@ -1218,7 +1247,10 @@ public final class DistantDraw extends FamilyDraw {
 		}
 
 		String servedBy = loaded.path().substring(loaded.path().lastIndexOf('/') + 1);
-		Optional<ChainPlan.Pass> geometry = this.plan.geometryOf(servedBy, element.afterDeferred());
+		Optional<ChainPlan.Pass> geometry = this.plan.geometryOf(element.program(), element.afterDeferred());
+		if (geometry.isEmpty() && !servedBy.equals(element.program())) {
+			geometry = this.plan.geometryOf(servedBy, element.afterDeferred());
+		}
 		if (geometry.isEmpty()) {
 			return List.of();
 		}
@@ -1424,7 +1456,7 @@ public final class DistantDraw extends FamilyDraw {
 		 * @return the slot this half's first section landed in, or -1 when there was no room left
 		 *         for it
 		 */
-		int write(GpuDevice device, List<DhLods.Section> sections, Vec3 camera) {
+		int write(GpuDevice device, List<DistantTerrainSection> sections, Vec3 camera) {
 			int stride = slotBytes(device);
 			// Room for BOTH halves and not for the one at hand, which is the whole reason the wanted
 			// count is doubled at the head of a frame: the second half of a frame cannot be given a
@@ -1462,7 +1494,7 @@ public final class DistantDraw extends FamilyDraw {
 			try (GpuBufferSlice.MappedView view = this.buffer.currentBuffer().map(false, true)) {
 				ByteBuffer data = view.data();
 				for (int index = 0; index < sections.size(); index++) {
-					DhLods.Section section = sections.get(index);
+					DistantTerrainSection section = sections.get(index);
 					data.position((base + index) * stride);
 					Std140Builder.intoBuffer(data).putVec3(
 							(float) (section.x() - camera.x),

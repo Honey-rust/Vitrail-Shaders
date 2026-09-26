@@ -117,9 +117,10 @@ final class DistantProgram extends FamilyProgram {
 		// load bound them against is a plan without the user's pass filter. The step is the half's,
 		// the two standing on opposite sides of the deferred stage.
 		String servedBy = loaded.path().substring(loaded.path().lastIndexOf('/') + 1);
+		String scheduledAs = element.terrainFallback() ? element.program() : servedBy;
 		PackProgram.Loaded bound = loaded.rebind(chainTargets, element.afterDeferred()
-				? chainTargets.schedule().stepAfterDeferred(servedBy)
-				: chainTargets.schedule().step(servedBy));
+				? chainTargets.schedule().stepAfterDeferred(scheduledAs)
+				: chainTargets.schedule().step(scheduledAs));
 
 		VertexFormat format = DistantMesh.format(carried);
 

@@ -151,6 +151,9 @@ public final class LegacyGlsl {
 	 */
 	public static final Map<String, String> CORE_MATRICES = coreMatrices();
 
+	/** Distant Horizons values packs may read without declaring, supplied by the DH uniform catalogue. */
+	public static final Map<String, String> DH_UNIFORMS = dhUniforms();
+
 	/**
 	 * The name the game binds its own per draw transforms under, which is therefore the name the
 	 * block has to be declared with. The members below are ours to name; this one is not.
@@ -690,6 +693,19 @@ public final class LegacyGlsl {
 		matrices.put("projectionMatrix", "mat4 projectionMatrix");
 
 		return Collections.unmodifiableMap(matrices);
+	}
+
+	private static Map<String, String> dhUniforms() {
+		Map<String, String> uniforms = new LinkedHashMap<>();
+
+		uniforms.put("dhProjection", "mat4 dhProjection");
+		uniforms.put("dhProjectionInverse", "mat4 dhProjectionInverse");
+		uniforms.put("dhPreviousProjection", "mat4 dhPreviousProjection");
+		uniforms.put("dhNearPlane", "float dhNearPlane");
+		uniforms.put("dhFarPlane", "float dhFarPlane");
+		uniforms.put("dhRenderDistance", "int dhRenderDistance");
+
+		return Collections.unmodifiableMap(uniforms);
 	}
 
 	private static Map<String, String> entityUniforms() {
