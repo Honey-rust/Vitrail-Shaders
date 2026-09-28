@@ -72,6 +72,14 @@ public final class GraphicsApi {
 	}
 
 	/**
+	 * Forgets a pipeline compiled by this engine where that compilation is owned separately from
+	 * the game's cache. Minecraft 26.2 keeps it in the device cache itself, which is cleared by the
+	 * game, so there is no additional object for Vitrail to release here.
+	 */
+	public static void forget(RenderPipeline pipeline) {
+	}
+
+	/**
 	 * A shader source answering by id and stage out of a function, which on this game is all a
 	 * source is.
 	 */

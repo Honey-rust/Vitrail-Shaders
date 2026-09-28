@@ -77,11 +77,11 @@ final class PlainDistantDraw {
             #endif
         }
         """;
-    private static final ShaderSource SOURCE = (id, type) -> {
+    private static final ShaderSource SOURCE = GraphicsApi.source((id, type) -> {
         if (!SHADER.equals(id) && !DETAIL_SHADER.equals(id)) return null;
         String source = type == ShaderType.VERTEX ? VERTEX : type == ShaderType.FRAGMENT ? FRAGMENT : null;
         return source != null && DETAIL_SHADER.equals(id) ? source.replace("#version 460 core", "#version 460 core\n#define TEXTURED") : source;
-    };
+    });
     private static RenderPipeline pipeline;
     private static final RenderPipeline[] pipelines = new RenderPipeline[4];
     private static GpuFormat colourFormat;
@@ -103,18 +103,18 @@ final class PlainDistantDraw {
         try {
             GeometryHold.flush(() -> "plain distant terrain");
             GpuFormat format = target.getColorTexture().getFormat();
-            if (colourFormat != format) java.util.Arrays.fill(pipelines, null);
+            if (colourFormat != format) forgetPipelines();
             for (boolean detailed : new boolean[]{false, true}) {
             int pipelineIndex = (opaque ? 0 : 1) + (detailed ? 2 : 0);
             pipeline = pipelines[pipelineIndex];
             if (pipeline == null) {
                 colourFormat = format;
-                var layout = BindGroupLayout.builder().withUniform("PlainLod", UniformType.UNIFORM_BUFFER).withSampler("Lightmap");
-                if (detailed) layout.withSampler("LodAtlas");
                 var builder = RenderPipeline.builder().withLocation(Identifier.fromNamespaceAndPath(Vitrail.MOD_ID,
                                 (opaque ? "plain_lod_opaque" : "plain_lod_translucent") + (detailed ? "_detail" : "")))
                         .withVertexShader(detailed ? DETAIL_SHADER : SHADER).withFragmentShader(detailed ? DETAIL_SHADER : SHADER)
-                        .withBindGroupLayout(layout.build())
+                        .withBindGroupLayout(detailed
+                                ? GraphicsApi.blockAndSamplers("PlainLod", "Lightmap", "LodAtlas")
+                                : GraphicsApi.blockAndSamplers("PlainLod", "Lightmap"))
                         .withVertexBinding(0, DistantTerrainFormat.format(List.of("vPosition", "meta", "vColor")))
                         .withColorTargetState(new ColorTargetState(opaque ? Optional.empty() : Optional.of(BlendFunction.TRANSLUCENT), format, ColorTargetState.WRITE_ALL))
                         .withDepthStencilState(new DepthStencilState(CompareOp.GREATER_THAN, opaque))
@@ -125,7 +125,7 @@ final class PlainDistantDraw {
                         .addAttribute("detailAverage", 4, GpuFormat.RGBA8_UNORM).build());
                 pipeline = builder.build();
                 pipelines[pipelineIndex] = pipeline;
-                if (!device.precompilePipeline(pipeline, SOURCE).isValid()) {
+                if (!GraphicsApi.valid(GraphicsApi.compile(device, pipeline, SOURCE))) {
                     failed = true;
                     Vitrail.logger().error("Plain LOD pipeline compilation failed");
                     return false;
@@ -176,18 +176,20 @@ final class PlainDistantDraw {
             try (RenderPass pass = device.createCommandEncoder().createRenderPass(() -> "Plain Voxy LOD",
                     target.getColorTextureView(), Optional.empty(), depthView,
                     opaque ? OptionalDouble.of(0.0) : OptionalDouble.empty())) {
-                pass.setPipeline(pipeline);
-                pass.bindTexture("Lightmap", mc.gameRenderer.lightmap(),
+                GraphicsApi.setPipeline(pass, pipeline);
+                GraphicsApi.bindTexture(pass, "Lightmap", mc.gameRenderer.lightmap(),
                         RenderSystem.getSamplerCache().getClampToEdge(FilterMode.LINEAR));
                 for (int i = 0; i < sections.size(); i++) {
                     pass.setUniform("PlainLod", uniforms.currentBuffer().slice((long)i * stride, 80));
                     for (var piece : sections.get(i).pieces()) {
                         if (piece.vertices().isClosed() || piece.indices().isClosed() || piece.indexCount() == 0) continue;
                         boolean detailed = piece.detail() != null && !piece.detail().isClosed();
-                        pass.setPipeline(pipelines[(opaque ? 0 : 1) + (detailed ? 2 : 0)]);
+                        GraphicsApi.setPipeline(pass,
+                                pipelines[(opaque ? 0 : 1) + (detailed ? 2 : 0)]);
                         if (detailed) {
                             pass.setVertexBuffer(1, piece.detail().slice());
-                            pass.bindTexture("LodAtlas", piece.atlas(), RenderSystem.getSamplerCache().getClampToEdge(FilterMode.NEAREST));
+                            GraphicsApi.bindTexture(pass, "LodAtlas", piece.atlas(),
+                                    RenderSystem.getSamplerCache().getClampToEdge(FilterMode.NEAREST));
                         }
                         pass.setVertexBuffer(0, piece.vertices().slice());
                         pass.setIndexBuffer(piece.indices(), IndexType.INT);
@@ -217,8 +219,16 @@ final class PlainDistantDraw {
         if (depthView != null) depthView.close();
         if (depth != null) depth.close();
         uniforms = null; depthView = null; depth = null; pipeline = null;
-        java.util.Arrays.fill(pipelines, null);
+        forgetPipelines();
         capacity = 0; reported = false; failed = false;
+    }
+
+    private static void forgetPipelines() {
+        for (int index = 0; index < pipelines.length; index++) {
+            RenderPipeline held = pipelines[index];
+            if (held != null) GraphicsApi.forget(held);
+            pipelines[index] = null;
+        }
     }
 }
 
