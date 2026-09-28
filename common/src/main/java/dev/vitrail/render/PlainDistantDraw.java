@@ -69,11 +69,15 @@ final class PlainDistantDraw {
             #ifdef TEXTURED
             vec2 pixel = vec2(tile % 16u, tile / 16u) * 16.0 + clamp(fract(uv) * 16.0, 0.5, 15.5);
             vec4 sampleColour = textureLod(LodAtlas, pixel / vec2(256.0, 12288.0), 0.0);
-            if (sampleColour.a <= 1.0 / 255.0) discard;
-            vec3 ratio = sampleColour.rgb / max(average.rgb, vec3(1.0 / 255.0));
             float detail = 1.0 - smoothstep(96.0, 256.0, distanceToCamera);
+            // Preserve the cutout silhouette while it still covers enough pixels to read.  At
+            // coarse distance the texel holes in leaves and other cutouts become white noise;
+            // Voxy's face average is the stable representation for that footprint.
+            if (detail > 1.0 / 255.0 && sampleColour.a <= 1.0 / 255.0) discard;
+            vec3 ratio = sampleColour.rgb / max(average.rgb, vec3(1.0 / 255.0));
             fragColour.rgb *= mix(vec3(1.0), ratio, detail);
-            fragColour.a *= clamp(sampleColour.a / max(average.a, 1.0 / 255.0), 0.0, 1.0);
+            float alphaRatio = clamp(sampleColour.a / max(average.a, 1.0 / 255.0), 0.0, 1.0);
+            fragColour.a *= mix(1.0, alphaRatio, detail);
             #endif
         }
         """;
