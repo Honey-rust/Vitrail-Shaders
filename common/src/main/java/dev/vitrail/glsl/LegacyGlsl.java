@@ -295,30 +295,6 @@ public final class LegacyGlsl {
 	public static final String CAMERA_BOB = "of_CameraBob";
 
 	/**
-	 * The game's transforms block, declared exactly as the game fills it.
-	 * <p>
-	 * All four members and not the two that are read, because std140 matches by OFFSET: the texture
-	 * matrix sits at ninety six bytes, behind a {@code mat4}, a {@code vec4} and a {@code vec3}, and a
-	 * block declaring only the last of the four would read the model view instead. The order is
-	 * {@code DynamicUniforms.Transform.write} at {@code renderer/DynamicUniforms.java:84}, and the
-	 * same four in the same order are what Iris declares at
-	 * {@code transform/transformer/VanillaTransformer.java:52-57}.
-	 * <p>
-	 * The other two are named rather than padded so that a reader meets the reason they are here.
-	 * Nothing reads them and nothing should: for a draw the game prepares from a render type the
-	 * modulator is always white and the offset always nought
-	 * ({@code rendertype/RenderType.java:76} reaching the two argument
-	 * {@code DynamicUniforms.writeTransform}, {@code renderer/DynamicUniforms.java:48-50}).
-	 */
-	public static final List<String> GAME_TRANSFORMS_BLOCK = List.of(
-			"layout(std140) uniform " + GAME_TRANSFORMS + " {",
-			"\tmat4 " + GAME_MODEL_VIEW + ";",
-			"\tvec4 of_GameColorModulator;",
-			"\tvec3 of_GameModelOffset;",
-			"\t" + "mat4 " + GAME_TEXTURE_MATRIX + ";",
-			"};");
-
-	/**
 	 * The roots of the fallback tree whose programs are drawn from a mesh that carries an entity's
 	 * identity, and so are served {@link #ENTITY_UNIFORMS}.
 	 * <p>
@@ -418,6 +394,56 @@ public final class LegacyGlsl {
 
 	/** The two lines of {@link #FULLSCREEN_ATTRIBUTES} that are inputs rather than macros. */
 	public static final List<String> FULLSCREEN_ELEMENTS = List.of("Position", "UV0");
+
+	/**
+	 * The core profile names of the two elements the quad carries, by the element each reads.
+	 * Iris renames them to the quad's own attributes in a full screen vertex stage that takes its
+	 * core path ({@code CompositeCoreTransformer.java:18-19}, chosen at
+	 * {@code TransformPatcher.java:151}), so a pack placing its corners with {@code vaPosition}
+	 * draws them where it put them rather than all at the origin. The other names of
+	 * {@link VertexPrologue#SYNTHESIZED} keep their constant, the quad carrying nothing else.
+	 */
+	private static final Map<String, String> FULLSCREEN_ANSWERED = Map.of(
+			"vaPosition", "Position",
+			"vaUV0", "UV0");
+
+	/**
+	 * What one of {@link #FULLSCREEN_ANSWERED} reads as under the type the pack declared it with,
+	 * or {@code null} for a name the quad does not carry or a type that is not a float vector.
+	 * <p>
+	 * The rename keeps the pack's declaration, so under Iris a {@code vec4 vaPosition} is the
+	 * three floats of {@code Position} widened the way the language widens an attribute: a missing
+	 * component reads nought and the fourth reads one. A narrower type keeps the leading ones.
+	 */
+	public static String fullscreenElement(String name, String type) {
+		String element = FULLSCREEN_ANSWERED.get(name);
+		int wanted = switch (type) {
+			case "float" -> 1;
+			case "vec2" -> 2;
+			case "vec3" -> 3;
+			case "vec4" -> 4;
+			default -> 0;
+		};
+		if (element == null || wanted == 0) {
+			return null;
+		}
+
+		int carried = VertexPrologue.elementType(element).equals("vec3") ? 3 : 2;
+		if (wanted == carried) {
+			return element;
+		}
+
+		if (wanted < carried) {
+			return element + "." + "xyzw".substring(0, wanted);
+		}
+
+		StringBuilder widened = new StringBuilder(type).append('(').append(element);
+		for (int component = carried; component < wanted; component++) {
+			widened.append(component == 3 ? ", 1.0" : ", 0.0");
+		}
+
+		return widened.append(')').toString();
+	}
 
 	/**
 	 * Functions GLSL gained after 120 that a pack written against 120 may define for itself. Its

@@ -2,6 +2,7 @@ package dev.vitrail.render;
 
 import dev.vitrail.glsl.EntityVertex;
 import dev.vitrail.glsl.LinesVertex;
+import dev.vitrail.glsl.MovingBlockVertex;
 import dev.vitrail.glsl.PackProgram;
 import dev.vitrail.pack.model.ProgramFallbacks;
 import dev.vitrail.pack.target.ChainPlan;
@@ -107,11 +108,16 @@ final class EntityProgram extends FamilyProgram {
 	 * <p>
 	 * {@code mc_Entity} is in none of the answers and is the one worth naming, since the chunk mesh
 	 * does carry it: an entity is not a block state and has no id to travel on, so a pack branching on
-	 * it here is branching on a constant.
+	 * it here is branching on a constant. A moving block reads the minus one Iris writes there, which
+	 * is a constant under both engines.
 	 */
 	private static Set<String> answered(EntityDraw.Element element) {
 		if (element.glint() || element.text()) {
 			return Set.of();
+		}
+
+		if (element.movingBlock()) {
+			return MovingBlockVertex.ANSWERED;
 		}
 
 		return element.lines() ? LinesVertex.ANSWERED : EntityVertex.ANSWERED;
@@ -181,7 +187,7 @@ final class EntityProgram extends FamilyProgram {
 				// the map's refusal is about the target, the lookup is about the program name.
 				shadow ? Optional.<BlendFunction>empty()
 						: BlendFunctions.of(ProgramFallbacks.blendOverride(element.program()),
-								game.getColorTargetState().blendFunction()),
+								GraphicsApi.colorTarget(game).blendFunction()),
 				// covers: the mask on every piece drawn before the seed and on no other, which is
 				// Element.covers and is answered there, beside the question of which side of the
 				// stage a piece is drawn on. It is what takes draw buffer nought of those pieces off

@@ -11,6 +11,110 @@ publishing a jar named after one thing and built from another.
 Everything is a pre-release while the version stays under `1.0.0`. Nothing here is a promise about
 what the next one holds.
 
+## 0.12.0-beta
+
+### Added
+
+- **Minecraft 26.3.** The same source builds a jar for 26.2 and one for 26.3, and each jar refuses
+  the other game. On 26.3 it needs NeoForge 26.3.0.16-beta or later, or Fabric Loader with Fabric
+  API, and the Sodium 0.9.2 built for 26.3. On NeoForge, Complementary Reimagined draws there as it
+  does on 26.2: its terrain, water, shadows, sky, sun, moon and stars, mobs, the hand, clouds, rain
+  and snow, particles and composites, and the game's translucent features the pack does not serve
+  are composed into its image as on 26.2, and so is Distant Horizons' far terrain, land and water
+  both, with the pack's own `dh_terrain` and `dh_water`. Compiled shader modules are kept on disk,
+  so a second load of a pack skips the compile. The game's improved transparency is turned off
+  while a pack draws, as Iris turns it off on the other backend and as on 26.2. One thing is not carried over yet: a program with a geometry stage is
+  served only where that stage passes each corner on, which is folded into the stage after it, as on
+  a Mac on either game, and any other such program is set aside with a line in the log.
+- **The compiling notice in the top-left corner can be turned off.** A Compile Notice switch on
+  Vitrail's page of the video settings hides the pulsing mark and its "Compiling shaders..." words.
+  It is on by default, the pack compiles exactly as before either way, and the F3 screen still
+  says when it is compiling.
+
+### Changed
+
+- **Shadow Reuse is off by default.** The shadow map is drawn again on every frame, as Iris draws
+  it, so the frame rate you read is the one of the same shadow work. The setting is still on the
+  engine page for anyone who wants the frames it wins, by keeping the ground of the map for one or
+  two frames. A value you already set yourself is kept.
+
+### Fixed
+
+- **World space reflections show the blocks they reflect instead of black.** A pack can name one
+  of the game's atlases as a texture of its own, and Complementary Reimagined colours its world
+  space reflections from the block atlas that way. An atlas is built while the game runs and is no
+  file of any resource pack, so Vitrail found no file and bound one black texel in its place, and
+  every block reflected from off screen came out black. A texture the game holds under that name
+  is now bound as it stands, as Iris binds it.
+- **Coloured lighting works on a Mac.** Vitrail no longer tells a pack it is running on a Mac.
+  Packs read that as Apple's OpenGL driver and switch off what it lacks: Complementary Reimagined
+  turned its coloured lighting (Advanced Color Tracing) off and painted an error over the picture
+  when it was asked for. On a Mac Vitrail draws through Vulkan on Metal, which has what the
+  setting needs, so it now works there, and so do the improved rain and the rest of what the pack
+  held back for Apple's driver.
+- **Shadow comparisons are enabled on a Mac.** The sampler a pack's shadow lookups compare through
+  is one a Mac's Vulkan driver only accepts once a feature of its portability rules is enabled, and
+  nothing enabled it. The driver drew the lookups anyway, but a launch under the Khronos validation
+  layer had them refused, and the terrain was then drawn with stale textures until the game
+  crashed. The feature is now enabled wherever those rules apply.
+- **Moving blocks are drawn through the shader pack instead of falling back to the game's shader.**
+  Falling blocks such as sand and blocks carried by pistons use Minecraft's moving-block pipelines,
+  which were not served by the pack. They are now routed to the same shader programs Iris uses for
+  those pipelines and carry what Iris gives them: the real light map, the normal of each face, its
+  tangent and the other terrain inputs a pack lights a block with.
+- **SEUS PTGI HRR 3 is no longer set aside as soon as it loads.** Its anti-aliasing header carries
+  a comment giving example settings for other platforms, and the engine read those examples as if
+  the pack had set them. It then took the code meant for those platforms as the code in use, left
+  the three programs that include the header without the pieces they call, and since those could
+  not be built, drew nothing of the pack at all. A line inside a comment no longer decides which
+  code is in use, nor sets a name. What a pack writes inside a comment about its own buffers, their
+  format and their mip chain, is read in full as Iris reads it, so Complementary Reimagined and
+  Unbound with EuphoriaPatches get the buffers their text asks for.
+- **Photon no longer crashes the game with its water parallax on.** Looking along the water surface,
+  as when swimming just at it, the pack's waves were computed far out along the view, the engine's
+  own sine came out enormous there, and the pack's water kept stepping until the graphics driver
+  gave up and the game closed with a lost device. The sine now stays between minus one and one for
+  any value, as the driver's does, and nothing changes wherever it already did.
+- **Photon loads with cloud shadows turned off.** The pack stops one of its programs with an error
+  message when that setting is off, a message Iris only writes to the log. The engine handed it on
+  to the shader compiler, which refused the program, and the whole pack with it. Such a message no
+  longer stops anything, and the pack loads.
+- **A full screen program reading the quad's corners by their core profile names draws.** A pack
+  reading `vaPosition` or `vaUV0` in a core profile composite, deferred or final was handed
+  nought for both, so a program that placed its corners from them compiled and drew nothing. Both
+  now read the quad's own position and texture coordinate under the type the pack declared, as
+  under Iris.
+- **A properties file's own defines now count for its sizes, uniforms and identifiers.**
+  A `#define` or `#undef` written there was ignored, so a later condition on that name was decided
+  as if it had never been written, and an image size, a custom uniform or an item or entity
+  identifier using it came out wrong or not at all. All of them now read the name as the line
+  above left it, as under Iris. Complementary with Euphoria Patches is the pack that shows it: its
+  profiles that set entity shadows to off now turn them off.
+- **A compute reading a texture that could not be loaded still runs.** A pack naming a texture
+  that could not be read lost every compute pass reading it, taken out of the frame. Such a
+  compute now reads what the full screen pass beside it reads, and runs. A game texture that no
+  loaded resource pack ships and the game does not hold either now reads the game's missing texture
+  in every pass, as under Iris, where it read black.
+- **A pack image that cannot be read no longer turns a buffer black.** When a pack replaced one of
+  its buffers with an image of its own and that file did not open as a PNG, every pass
+  reading that buffer read black. The buffer now keeps what it held before, in full screen,
+  compute and world passes alike, as under Iris, and the log names the image.
+- **Shadows no longer sway with the view bobbing after the player is hurt.** Being hit while
+  walking tilts the camera in a way the engine took for a matrix that was not the world's, and from
+  then on, for the rest of the session, it handed packs the walk bob inside the projection rather
+  than beside the camera. BSL and Bliss rebuild positions on screen assuming the projection has no
+  bob in it, so their shadows, and anything else placed that way, slid with every step. The bob now
+  stays where packs expect it, as on Iris, whatever tilts the camera.
+- **iterationRP draws its lighting.** Its lighting programs store into the pack's buffers from
+  full screen and world passes rather than from a compute, read its light volumes as integers
+  where they were stored as colours, and name several of them through the pack's own defines.
+  None of the three was served, so the scene stayed dark. All three are now served as under Iris,
+  and a program whose buffer or view this graphics card cannot store into is set aside with a
+  line in the log saying so.
+- **The pass timings table reads real times on a Mac.** With `-Dvitrail.passTimings` set, every
+  pass read nought on Apple hardware, the timestamp store it asked for being larger than Metal
+  holds. It now asks for one Metal accepts, and each pass reads the card's own time.
+
 ## 0.11.0-beta
 
 ### Added

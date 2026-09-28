@@ -10,6 +10,7 @@ import dev.vitrail.pack.target.SamplerPlan;
 import dev.vitrail.pack.target.TargetSchedule;
 import dev.vitrail.pack.texture.CustomImages;
 import dev.vitrail.render.storage.StorageBuffers;
+import dev.vitrail.render.storage.StorageImages;
 import dev.vitrail.uniform.TextSink;
 import dev.vitrail.uniform.WorldState;
 import dev.vitrail.Vitrail;
@@ -154,6 +155,12 @@ final class PackPass {
 	private final List<String> notes = new ArrayList<>();
 	private final List<GpuTextureView> attachedViews = new ArrayList<>();
 
+	/** Whether the colour image this program stores into was already said to be unwritable. */
+	private boolean unwritableNoted;
+
+	/** The custom image views this program asks for and the device cannot give, said once. */
+	private final List<String> unusableViews;
+
 	/**
 	 * The area of the last descriptor built and the screen it was built for. This program's own size
 	 * follows the screen and nothing else, so the value moves on a resize and never between two.
@@ -200,6 +207,11 @@ final class PackPass {
 		this.uniforms = new PackUniforms(loaded.program().uniforms(), values.catalog());
 		this.samplers = loaded.program().samplers().stream().map(TranslatedUnit.Uniform::name).toList();
 		this.samplerBindings = this.samplers.stream().map(loaded.samplers()::binding).toList();
+		this.unusableViews = StorageImages.unusableViews(this.samplers);
+		if (!this.unusableViews.isEmpty()) {
+			Vitrail.logger().warn("{} is not drawn: it reads {} through a view this device cannot "
+					+ "sample and store in that format", this.path, this.unusableViews);
+		}
 		List<ColorTargets.PackSource> sources = new ArrayList<>();
 		for (int at = 0; at < this.samplers.size(); at++) {
 			SamplerPlan.Binding binding = this.samplerBindings.get(at);
@@ -239,17 +251,17 @@ final class PackPass {
 		Identifier fragmentId = Identifier.fromNamespaceAndPath(Vitrail.MOD_ID, stem + "/fragment");
 		claim(load, this.path, vertexId, fragmentId);
 
-		this.source = (id, type) -> {
+		this.source = GraphicsApi.source((id, type) -> {
 			if (type == ShaderType.FRAGMENT) {
 				return fragmentId.equals(id) ? fragment : null;
 			}
 
 			return vertexId.equals(id) ? vertex : null;
-		};
+		});
 
 		BindGroupLayout.Builder bindings = BindGroupLayout.builder()
 				.withUniform(UNIFORM_BLOCK, UniformType.UNIFORM_BUFFER);
-		this.samplers.forEach(bindings::withSampler);
+		this.samplers.forEach(name -> GraphicsApi.withSampler(bindings, name));
 		this.storage.forEach(name -> bindings.withUniform(name, UniformType.UNIFORM_BUFFER));
 
 		RenderPipeline.Builder builder = RenderPipeline.builder()
@@ -321,7 +333,7 @@ final class PackPass {
 	 * rebuilt from the game's own shader sources, which do not contain a line of this pack.
 	 */
 	CompiledRenderPipeline compile(GpuDevice device) {
-		return device.precompilePipeline(this.pipeline, this.source);
+		return GraphicsApi.compile(device, this.pipeline, this.source);
 	}
 
 	/** {@code world0/composite4}, which is what a log line and a failure name it by. */
@@ -499,6 +511,16 @@ final class PackPass {
 		return List.copyOf(this.notes);
 	}
 
+	/** The colour targets a translated program stores into as {@code colorimgN}, either stage. */
+	static Set<Integer> colourImages(PackProgram.Loaded loaded) {
+		Set<Integer> indices = new LinkedHashSet<>();
+		for (TranslatedUnit.Uniform sampler : loaded.program().samplers()) {
+			TargetName.imageIndex(sampler.name()).ifPresent(indices::add);
+		}
+
+		return indices;
+	}
+
 	/**
 	 * {@code colortex6 as sampler3D}. The type is always printed beside the name, because the name
 	 * on its own is what made this look like a colour target in the first place.
@@ -531,7 +553,7 @@ final class PackPass {
 			this.attachedViews.add(view(targets, attachment));
 		}
 
-		RenderPassDescriptor descriptor = RenderPassDescriptor.create(this.label);
+		PassDescriptor descriptor = PassDescriptor.create(this.label);
 		for (GpuTextureView view : this.attachedViews) {
 			descriptor.withColorAttachment(view, targets.takeClear(view));
 		}
@@ -548,7 +570,7 @@ final class PackPass {
 			targets.flushPending(encoder);
 		}
 
-		try (RenderPass pass = encoder.createRenderPass(descriptor)) {
+		try (RenderPass pass = encoder.createRenderPass(descriptor.build())) {
 			record(pass, targets, depthView, distantView, quad, uniforms);
 		}
 	}
@@ -588,13 +610,14 @@ final class PackPass {
 
 	private void record(RenderPass pass, ColorTargets targets, GpuTextureView depthView,
 			GpuTextureView distantView, GpuBuffer quad, GpuBufferSlice uniforms) {
-		pass.setPipeline(this.pipeline);
+		GraphicsApi.setPipeline(pass, this.pipeline);
 		RenderSystem.bindDefaultUniforms(pass);
 		pass.setUniform(UNIFORM_BLOCK, uniforms);
 		StorageBuffers.bind(pass, this.storage);
 		pass.setVertexBuffer(0, quad.slice());
-		bindSamplers(pass, targets, depthView, distantView);
-		pass.draw(VERTICES, 1, 0, 0);
+		if (this.unusableViews.isEmpty() && bindSamplers(pass, targets, depthView, distantView)) {
+			pass.draw(VERTICES, 1, 0, 0);
+		}
 	}
 
 	/**
@@ -609,11 +632,38 @@ final class PackPass {
 	 * @param distantView the far terrain's depth on the same split, already converted as well, or
 	 *                    null for the far plane on the frames the pack drew no far terrain
 	 */
-	private void bindSamplers(RenderPass pass, ColorTargets targets, GpuTextureView depthView,
+	private boolean bindSamplers(RenderPass pass, ColorTargets targets, GpuTextureView depthView,
 			GpuTextureView distantView) {
 		for (int at = 0; at < this.samplers.size(); at++) {
 			String sampler = this.samplers.get(at);
 			SamplerPlan.Binding binding = this.samplerBindings.get(at);
+			// An imageStore from a vertex or fragment stage writes the same half that a compute
+			// hanging off this pass would write. A final has no step, so it uses the frame's
+			// ending side. The descriptor mixins turn this binding into a storage image.
+			var image = TargetName.imageIndex(sampler);
+			if (image.isPresent()) {
+				int index = image.getAsInt();
+				TargetSchedule.Side side = this.step == null
+						? (targets.schedule().flippedAtEnd().contains(index)
+								? TargetSchedule.Side.ALT : TargetSchedule.Side.MAIN)
+						: this.step.read(index);
+				TargetSurface target = targets.surface(index, side);
+				// Left unbound the draw would throw and stop the whole pack, so this program alone
+				// is not drawn, as a compute storing into such a target is not dispatched.
+				if (target == null || !target.storage()) {
+					if (!this.unwritableNoted) {
+						this.unwritableNoted = true;
+						Vitrail.logger().warn("{} stores into {}, which {}, so it is not drawn",
+								this.path, sampler, target == null
+										? "this place never allocated"
+										: "was not created writable: this device makes no storage "
+												+ "image of its format");
+					}
+					return false;
+				}
+				GraphicsApi.bindTexture(pass, sampler, target.storageView(), sampler(false, FilterMode.NEAREST, false));
+				continue;
+			}
 
 			// A texture the pack ships answers all three questions at once, and they are one
 			// answer: which image, how it is filtered, and how it is addressed outside zero to one
@@ -662,13 +712,16 @@ final class PackPass {
 				// layout carries it either way and the draw throws on the first name it misses.
 				//
 				// A pack texture reaches this line only when the pack took the name over and
-				// nothing could be read for it, which does not cover a file the pack simply does
-				// not ship: that case hands the name back and the colour target keeps its ordinary
-				// binding, as it does under Iris. What is left here is a declaration that named
-				// something real and could not be turned into an image, and black is the honest
-				// answer for it: falling back to the colour target of the same name would have the
-				// pass read the scene as whatever the pack meant to sample and look convincing.
-				case UNSERVED, UNBINDABLE, PACK_TEXTURE, CUSTOM_IMAGE -> targets.black();
+				// nothing could be put behind it, which covers neither a file the pack does not
+				// ship nor a picture refused at its header: both hand the name back and the colour
+				// target keeps its ordinary binding, as it does under Iris. What is left here is a
+				// declaration this engine could not serve, a raw blob it does not lay out, a path
+				// outside the pack, or a picture whose pixels do not decode or are more than this
+				// engine allocates, and black is the honest answer for it: the colour target of
+				// the same name would have the pass read the scene as whatever the pack meant to
+				// sample and look convincing.
+				// A colour image never reaches this switch, bound above as a storage image.
+				case UNSERVED, UNBINDABLE, PACK_TEXTURE, CUSTOM_IMAGE, COLOUR_IMAGE -> targets.black();
 			};
 
 			// The noise image is LINEAR for the same reason the terrain reads it LINEAR: it is a
@@ -750,11 +803,13 @@ final class PackPass {
 			// it produces a field of stripes that reads as an effect nobody asked for, and it takes
 			// whatever the pack built out of it down with it. A texture of the pack's own says for
 			// itself, in the .mcmeta beside the file.
-			pass.bindTexture(sampler, bound == null ? targets.black() : bound,
+			GraphicsApi.bindTexture(pass, sampler, bound == null ? targets.black() : bound,
 					supplied != null
-							? sampler(source.repeat(), filter, false)
+							? sampler(source.repeat(), filter, source.mipmaps())
 							: sampler(binding.kind(), filter, mipmaps));
 		}
+
+		return true;
 	}
 
 	/**
@@ -847,8 +902,8 @@ final class PackPass {
 	 * directive declared, and that is NEAREST.
 	 */
 	static FilterMode customImageFilter(String sampler) {
-		return CustomImages.image(sampler)
-				.map(image -> GpuFormats.filterFor(image.internalFormat().used()))
+		return CustomImages.viewFormat(sampler)
+				.map(GpuFormats::filterFor)
 				.orElse(FilterMode.NEAREST);
 	}
 

@@ -218,6 +218,12 @@ the engine binds a buffer by name. At most one stage can then read what it think
 stages of a program therefore get a single block holding the union of their uniforms, in a
 canonical order.
 
+Opaque uniforms share that program-wide order as well. A sampler declared under a one-name macro
+has to be recorded under the name that macro expands to at the declaration: its new header stands
+before the pack's `#define`, while uses in the body still expand under it. An image declared by
+only one stage must carry its format and memory qualifiers into the sibling's shared header too;
+otherwise shaderc refuses a bare image in the stage that never asked for it.
+
 **Varyings.** They are matched by name, and the two failure directions are not symmetric: a varying
 the fragment declares without the vertex emitting it is refused loudly, while the reverse is silent
 and shifts the locations of everything after it.
@@ -426,6 +432,16 @@ for that path, three different mechanisms, and it is worth knowing which:
   never set the Vulkan storage flag on their own; a colour target a compute stores into has to
   stay the texture the passes attach, so there the flag is added to what that conversion returns,
   for the one creation that asks.
+
+Custom images can use different numeric interpretations of the same memory. For example, a
+pack can allocate `R32F` and declare `layout(r32ui) uniform uimage2D` for integer atomics, or
+allocate `RGBA8` and write its packed word through `r32ui`. The translator retains the shader's
+format and encodes a compatible view in the resource name. The binding selects that format on the
+same mutable Vulkan image, with an explicit device-supported view format list. Integer samplers
+select a view with the same channel widths and signedness and use nearest filtering. Views are
+created on demand, cached, and retired with their image; there is no per-frame conversion or copy.
+Different texel sizes are refused during translation. The encoded name also survives both shader
+caches, and custom image formats are part of the translation cache identity.
 
 No amount of translation work makes a pack compute unit or a pack storage image pass through the
 facade. Vulkan itself supports all of them. The layer above does not, and the backend below it
