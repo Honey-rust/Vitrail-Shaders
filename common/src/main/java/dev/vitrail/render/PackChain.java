@@ -1268,6 +1268,7 @@ public final class PackChain {
 		// survive every release on purpose, so the shutdown is the one caller that really frees
 		// them.
 		DistantDraw.close();
+		PlainDistantDraw.close();
 		ConstantTextures.close();
 		ShadowCompare.close();
 		GeometryStage.close();

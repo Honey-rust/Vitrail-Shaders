@@ -1,5 +1,6 @@
 package dev.vitrail.render;
 
+import dev.vitrail.api.render.DistantTerrainRenderer;
 import dev.vitrail.dh.DhDepth;
 import dev.vitrail.pack.id.NameIds;
 import dev.vitrail.pack.model.RenderStage;
@@ -507,13 +508,30 @@ public final class FrameState implements WorldState {
 		float near = planes ? this.distantPlanes.x : ViewMatrices.FALLBACK_PLANE;
 		float far = planes ? this.distantPlanes.y : ViewMatrices.FALLBACK_PLANE;
 
-		if (!DhDepth.usable()) {
-			distance = -1;
-			near = ViewMatrices.FALLBACK_PLANE;
-			far = ViewMatrices.FALLBACK_PLANE;
-			scale = 0.0F;
-			offset = 0.0F;
-		}
+        if (!DhDepth.usable()) {
+            // An external provider can supply a far terrain without Distant Horizons itself.
+            // Keep its real block reach in the DH-compatible uniforms; falling back to the
+            // vanilla render distance here makes shader-pack fog erase nearly all of that terrain.
+            distance = DistantTerrainRenderer.providerRenderDistanceBlocks();
+            if (distance > 0) {
+                near = DistantTerrainRenderer.providerNearPlaneBlocks();
+                far = DistantTerrainRenderer.providerFarPlaneBlocks();
+                if (!(near > 0.0F)) near = 16.0F;
+                if (!(far > near)) far = Math.max(near + 1.0F,
+                        distance * (float) Math.sqrt(3.0));
+
+                // Minecraft's Vulkan projection is reversed Z over 0..1. Replace only its depth
+                // row, as the DH path does, so the pack's dhProjection, planes and the image
+                // actually rasterised all describe the same volume.
+                scale = near / (far - near);
+                offset = near * far / (far - near);
+            } else {
+                near = ViewMatrices.FALLBACK_PLANE;
+                far = ViewMatrices.FALLBACK_PLANE;
+                scale = 0.0F;
+                offset = 0.0F;
+            }
+        }
 
 		this.view.advanceDistant(near, far, distance);
 		this.view.advanceDistantVolume(scale, offset);

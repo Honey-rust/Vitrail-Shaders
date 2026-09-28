@@ -33,5 +33,22 @@ public final class MatrixValues {
 				(world, out) -> out.set(world.gbufferProjectionInverse()));
 		builder.add("gbufferPreviousProjection", UniformShape.MAT4,
 				(world, out) -> out.set(world.gbufferPreviousProjection()));
+
+		// Voxy's shader interface uses its own spellings for the same camera matrices. On the
+		// Vulkan path Voxy does not own a separate view/projection stack: its CPU LOD meshes are
+		// submitted to this engine's distant pass, so these uniforms must follow the frame matrices
+		// that actually draw that pass instead of resolving to zero.
+		builder.add("vxModelView", UniformShape.MAT4,
+				(world, out) -> out.set(world.gbufferModelView()));
+		builder.add("vxModelViewInv", UniformShape.MAT4,
+				(world, out) -> out.set(world.gbufferModelViewInverse()));
+		builder.add("vxModelViewPrev", UniformShape.MAT4,
+				(world, out) -> out.set(world.gbufferPreviousModelView()));
+		builder.add("vxProj", UniformShape.MAT4,
+				(world, out) -> out.set(world.gbufferProjection()));
+		builder.add("vxProjInv", UniformShape.MAT4,
+				(world, out) -> out.set(world.gbufferProjectionInverse()));
+		builder.add("vxProjPrev", UniformShape.MAT4,
+				(world, out) -> out.set(world.gbufferPreviousProjection()));
 	}
 }

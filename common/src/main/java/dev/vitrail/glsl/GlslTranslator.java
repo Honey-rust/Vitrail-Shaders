@@ -1198,6 +1198,15 @@ public final class GlslTranslator {
 			}
 		}
 
+		// Iris makes the Distant Horizons interface available even when a pack reads it outside
+		// its DH define guard. Registering a value alone is not enough: when the pack did not
+		// declare the uniform, GLSL still needs a block member emitted for every name it reads.
+		for (Map.Entry<String, String> member : LegacyGlsl.DH_UNIFORMS.entrySet()) {
+			if (this.used.contains(member.getKey()) && !this.declaredNames.contains(member.getKey())) {
+				block.add(TranslatedUnit.Uniform.of(member.getKey(), member.getValue()));
+			}
+		}
+
 		// Not where the mesh carries them, which is the answer liftUniforms gives for a pack that
 		// declared one of the three itself, given here for a pack that never declares them. The two
 		// halves have to agree: a name offered here and taken out of the block there would be a

@@ -4,6 +4,8 @@ import dev.vitrail.render.DistantDraw;
 import dev.vitrail.render.DistantMesh;
 import dev.vitrail.render.timing.PassTimings;
 import dev.vitrail.Vitrail;
+import dev.vitrail.api.render.DistantTerrainSection;
+import dev.vitrail.api.render.DistantTerrainSection.Piece;
 
 import com.mojang.blaze3d.GpuDeviceLossException;
 import com.mojang.blaze3d.buffers.GpuBuffer;
@@ -211,8 +213,8 @@ public final class DhLods {
 
 	private static int listedCount;
 
-	private static List<Section> opaqueSections;
-	private static List<Section> translucentSections;
+	private static List<DistantTerrainSection> opaqueSections;
+	private static List<DistantTerrainSection> translucentSections;
 
 	/**
 	 * How many times {@link #forget} has let go of all three, which is read across a
@@ -461,21 +463,6 @@ public final class DhLods {
 	 * vertices under it hold block coordinates INSIDE it, three unsigned shorts wide, so what places
 	 * them is this and it changes between draws of one pass.
 	 */
-	public record Section(int x, int y, int z, List<Piece> pieces) {
-
-		public Section {
-			pieces = List.copyOf(pieces);
-		}
-	}
-
-	/**
-	 * One draw of one section, in blaze3d's own objects and nothing of DH's. What crosses out of this
-	 * package is this record and not a wrapper of DH's, so that nothing downstream of it is
-	 * reflective.
-	 */
-	public record Piece(GpuBuffer vertices, GpuBuffer indices, int indexCount) {
-	}
-
 	private static void resolve() {
 		resolved = true;
 
@@ -561,12 +548,12 @@ public final class DhLods {
 			if (usable && "render".equals(method.getName()) && args != null && args.length == 4) {
 				boolean opaque = (Boolean) args[1];
 				try {
-					List<Section> sections = sections(args[2], opaque);
+					List<DistantTerrainSection> sections = sections(args[2], opaque);
 					report(sections, opaque);
 					// Drawn by the pack, or handed straight back to DH below. There is no third answer
 					// and no half of one: a pass this engine records and then lets DH record again
 					// would draw the far terrain twice, once lit by each engine.
-					if (DistantDraw.draw(opaque, sections)) {
+					if (dev.vitrail.api.render.DistantTerrainRenderer.drawWithProviders(opaque, sections)) {
 						return null;
 					}
 				} catch (GpuDeviceLossException e) {
@@ -685,7 +672,7 @@ public final class DhLods {
 	 * that moved drops both: DH refills its set in the frame's first half, so an answer kept for the
 	 * second would otherwise outlive the set it came out of.
 	 */
-	private static List<Section> sections(Object set, boolean opaque)
+	private static List<DistantTerrainSection> sections(Object set, boolean opaque)
 			throws ReflectiveOperationException {
 		drawn = true;
 
@@ -703,7 +690,7 @@ public final class DhLods {
 			translucentSections = null;
 		}
 
-		List<Section> kept = opaque ? opaqueSections : translucentSections;
+		List<DistantTerrainSection> kept = opaque ? opaqueSections : translucentSections;
 		if (kept == null) {
 			int dropped = drops;
 			kept = build(count, opaque);
@@ -773,14 +760,14 @@ public final class DhLods {
 	 * comparing it costs. Held here for the length of the walk, so that a {@link #checkStride} that
 	 * closes the road part way through leaves this one reading whole.
 	 */
-	private static List<Section> build(int count, boolean opaque)
+	private static List<DistantTerrainSection> build(int count, boolean opaque)
 			throws ReflectiveOperationException {
 		Object[] containers = listed;
 
 		// Given the width DH just answered with rather than grown into it. A far view hands out
 		// thousands of sections, and a list that starts at ten reaches that by allocating a longer
 		// array and copying the old one into it a dozen times over.
-		List<Section> sections = new ArrayList<>(count);
+		List<DistantTerrainSection> sections = new ArrayList<>(count);
 
 		// One list refilled section by section rather than one built per section: the record copies
 		// what it is handed, so nothing downstream can be holding this one, and a far view hands out
@@ -823,7 +810,7 @@ public final class DhLods {
 				Object corner = cornerField.get(one);
 				// Handed the working list, not a copy of it: the record's own constructor copies, so
 				// copying here made the same array twice.
-				sections.add(new Section((Integer) cornerX.invoke(corner),
+				sections.add(new DistantTerrainSection((Integer) cornerX.invoke(corner),
 						(Integer) cornerY.invoke(corner), (Integer) cornerZ.invoke(corner), pieces));
 			}
 		}
@@ -841,7 +828,7 @@ public final class DhLods {
 	}
 
 	/** Says once what the far terrain really holds, which is what tells a reader it is reachable. */
-	private static void report(List<Section> sections, boolean opaque) {
+	private static void report(List<DistantTerrainSection> sections, boolean opaque) {
 		if (reported || sections.isEmpty()) {
 			return;
 		}

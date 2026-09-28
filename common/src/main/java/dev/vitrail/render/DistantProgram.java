@@ -1,6 +1,7 @@
 package dev.vitrail.render;
 
 import dev.vitrail.dh.DhLods;
+import dev.vitrail.api.render.DistantTerrainRenderer;
 import dev.vitrail.glsl.DistantVertex;
 import dev.vitrail.glsl.PackProgram;
 import dev.vitrail.pack.target.ChainPlan;
@@ -117,9 +118,10 @@ final class DistantProgram extends FamilyProgram {
 		// load bound them against is a plan without the user's pass filter. The step is the half's,
 		// the two standing on opposite sides of the deferred stage.
 		String servedBy = loaded.path().substring(loaded.path().lastIndexOf('/') + 1);
+		String scheduledAs = element.terrainFallback() ? element.program() : servedBy;
 		PackProgram.Loaded bound = loaded.rebind(chainTargets, element.afterDeferred()
-				? chainTargets.schedule().stepAfterDeferred(servedBy)
-				: chainTargets.schedule().step(servedBy));
+				? chainTargets.schedule().stepAfterDeferred(scheduledAs)
+				: chainTargets.schedule().step(scheduledAs));
 
 		VertexFormat format = DistantMesh.format(carried);
 
@@ -204,7 +206,7 @@ final class DistantProgram extends FamilyProgram {
 		// Without DH standing, nothing ever draws these. And measured on a bench without that
 		// mod, the two dh programs also refused shaderc outright, so compiling ahead here bought
 		// nothing but refusal lines for programs no frame would ever ask for.
-		if (!DhLods.usable()) {
+		if (!DhLods.usable() && !DistantTerrainRenderer.hasProviders()) {
 			return false;
 		}
 

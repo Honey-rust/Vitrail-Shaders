@@ -94,20 +94,10 @@ public final class UniformGaps {
 				+ "is a nought there too";
 		reasons.put("velocity", shimNotWired);
 
-		// The uniforms of the Voxy mod. The mod sets the symbol a pack guards them with, and neither
-		// engine sets it: it appears nowhere in the Iris tree either, so a pack that guards both the
-		// declaration and the read never puts these names in front of an engine at all. What reaches
-		// a block is a pack that declares them whatever that symbol says, which is what raises the
-		// line: Solas, shaders/programs/deferred1.glsl:12, has them beside Distant Horizons' render
-		// distance with no guard over either.
+		// Voxy's render-distance setting has no equivalent available in the shader frame. Its
+		// matrix names are answered by MatrixValues from the camera matrices this distant pass uses.
 		String voxyMod = "it belongs to the Voxy mod, and no engine answers it with that mod absent";
 		reasons.put("vxRenderDistance", voxyMod);
-		reasons.put("vxProj", voxyMod);
-		reasons.put("vxProjInv", voxyMod);
-		reasons.put("vxProjPrev", voxyMod);
-		reasons.put("vxModelView", voxyMod);
-		reasons.put("vxModelViewInv", voxyMod);
-		reasons.put("vxModelViewPrev", voxyMod);
 
 		// Reverie's, shaders/lib/all_the_uniforms.glsl:27, beside the previousCameraPosition it
 		// really does read. Iris spells the split pair previousCameraPositionInt and
