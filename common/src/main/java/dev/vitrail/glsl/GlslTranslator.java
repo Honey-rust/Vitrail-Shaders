@@ -14,6 +14,7 @@ import dev.vitrail.pack.target.SamplerPlan;
 import dev.vitrail.pack.target.SamplerTypes;
 import dev.vitrail.pack.model.TargetName;
 import dev.vitrail.pack.texture.CustomImages;
+import dev.vitrail.pack.texture.CustomImageView;
 import dev.vitrail.pack.texture.VolumeAtlas;
 
 import java.util.ArrayList;
@@ -531,6 +532,12 @@ public final class GlslTranslator {
 	private final Map<String, String> synthesized = new LinkedHashMap<>();
 
 	/**
+	 * Whether the unit's version line sends it down Iris's core path: a {@code core} profile, or
+	 * version 150 and up with no profile named ({@code TransformPatcher.java:151}).
+	 */
+	private boolean coreProfile;
+
+	/**
 	 * Varyings this stage takes in, declared at file scope on a branch that is taken. Empty for a
 	 * vertex stage, whose file scope {@code in} is an attribute and a different matter entirely.
 	 */
@@ -835,7 +842,8 @@ public final class GlslTranslator {
 	public static String emissionSwitches() {
 		return (reduceTrig ? "trig-reduced" : "trig-driver")
 				+ (softCompare() ? " compare-in-shader" : " compare-on-sampler")
-				+ " shadow-chain-" + (shadowChainZero ? '1' : '0') + (shadowChainOne ? '1' : '0');
+				+ " shadow-chain-" + (shadowChainZero ? '1' : '0') + (shadowChainOne ? '1' : '0')
+				+ " custom-views-v1:" + CustomImages.key();
 	}
 
 	private void rewrite() {
@@ -879,6 +887,7 @@ public final class GlslTranslator {
 		// have had a chance to wrap.
 		moveCenterDepth();
 		liftUniforms();
+		nameCustomImageViews();
 		// After the lifting, which is where the samplers of the file are recorded by name and type,
 		// and after the depth, so that a comparison that road rewrote is under a name of ours by
 		// now and the lookups left standing are the ones that really sample an image.
@@ -948,6 +957,16 @@ public final class GlslTranslator {
 		 */
 		public Set<String> sampled() {
 			return this.translator.sampledNames();
+		}
+
+		/** The memory qualifiers a sibling stage also needs for shared opaque declarations. */
+		public Map<String, String> memoryQualifiers() {
+			return Collections.unmodifiableMap(new LinkedHashMap<>(this.translator.memoryQualifiers));
+		}
+
+		/** The format qualifiers a sibling stage also needs for shared image declarations. */
+		public Map<String, String> imageFormats() {
+			return Collections.unmodifiableMap(new LinkedHashMap<>(this.translator.imageFormats));
 		}
 
 		/**
@@ -1137,13 +1156,25 @@ public final class GlslTranslator {
 
 		public TranslatedUnit render(List<TranslatedUnit.Uniform> block,
 				List<TranslatedUnit.Uniform> samplers, Set<String> varyings, Set<String> shadowed) {
-			return this.translator.render(block, samplers, varyings, shadowed);
+			return this.translator.render(block, samplers, varyings, shadowed,
+					this.translator.memoryQualifiers, this.translator.imageFormats);
+		}
+
+		public TranslatedUnit render(List<TranslatedUnit.Uniform> block,
+				List<TranslatedUnit.Uniform> samplers, Set<String> varyings, Set<String> shadowed,
+				Map<String, String> sharedMemory, Map<String, String> sharedFormats) {
+			return this.translator.render(block, samplers, varyings, shadowed, sharedMemory, sharedFormats);
 		}
 	}
 
 	private TranslatedUnit render(List<TranslatedUnit.Uniform> block,
-			List<TranslatedUnit.Uniform> samplers, Set<String> varyings, Set<String> shadowed) {
-		Emitter emitter = emitter();
+			List<TranslatedUnit.Uniform> samplers, Set<String> varyings, Set<String> shadowed,
+			Map<String, String> sharedMemory, Map<String, String> sharedFormats) {
+		Map<String, String> memory = new LinkedHashMap<>(sharedMemory);
+		memory.putAll(this.memoryQualifiers);
+		Map<String, String> formats = new LinkedHashMap<>(sharedFormats);
+		formats.putAll(this.imageFormats);
+		Emitter emitter = emitter(memory, formats);
 
 		return new TranslatedUnit(this.unit.entry(), this.stage,
 				emitter.header(block, samplers, varyings, shadowed) + body(shadowed) + "\n"
@@ -1616,6 +1647,8 @@ public final class GlslTranslator {
 				}
 			} else if (!token.directive().equals("version")) {
 				continue;
+			} else {
+				this.coreProfile = declaresCoreProfile(index);
 			}
 
 			this.tokens.blankDirective(index);
@@ -2182,6 +2215,26 @@ public final class GlslTranslator {
 	 * one name that is a state and not an extension: hoisting it would turn every extension the
 	 * compiler knows on at once.
 	 */
+	private boolean declaresCoreProfile(int directive) {
+		int version = 0;
+		String profile = null;
+		for (int index = directive + 1; index < this.tokens.size(); index++) {
+			Token token = this.tokens.get(index);
+			if (token.kind() == Kind.NEWLINE) {
+				break;
+			}
+
+			if (token.kind() == Kind.NUMBER && version == 0
+					&& token.text().chars().allMatch(Character::isDigit)) {
+				version = Integer.parseInt(token.text());
+			} else if (token.kind() == Kind.IDENTIFIER && !token.text().equals("version")) {
+				profile = token.text();
+			}
+		}
+
+		return "core".equals(profile) || (profile == null && version >= 150);
+	}
+
 	private String extensionNamed(int directive) {
 		for (int index = directive + 1; index < this.tokens.size(); index++) {
 			Token token = this.tokens.get(index);
@@ -4843,9 +4896,23 @@ public final class GlslTranslator {
 	 */
 	private void liftUniforms() {
 		int[] lines = this.tokens.lineNumbers();
+		Map<String, String> aliases = new HashMap<>();
 
 		for (int index = 0; index < this.tokens.size(); index++) {
 			Token token = this.tokens.get(index);
+			if (token.kind() == Kind.HASH && this.unit.isLive(lines[index])) {
+				int name = this.tokens.macroNameAfter(index);
+				if (name >= 0 && "define".equals(token.directive())) {
+					String alias = aliasOf(name).orElse("");
+					if (alias.isEmpty()) {
+						aliases.remove(this.tokens.get(name).text());
+					} else {
+						aliases.put(this.tokens.get(name).text(), alias);
+					}
+				} else if (name >= 0 && "undef".equals(token.directive())) {
+					aliases.remove(this.tokens.get(name).text());
+				}
+			}
 			if (!token.identifier("uniform") || token.directive() != null) {
 				continue;
 			}
@@ -4860,7 +4927,7 @@ public final class GlslTranslator {
 			// stay in the body and Vulkan refuses the unit; PackChoice.load installs the table
 			// before SettingSet.resolve so the two readers agree.
 			if (this.unit.isLive(lines[index])) {
-				liftOne(index);
+				liftOne(index, aliases);
 			}
 		}
 
@@ -4885,7 +4952,7 @@ public final class GlslTranslator {
 		}
 	}
 
-	private void liftOne(int keyword) {
+	private void liftOne(int keyword, Map<String, String> aliases) {
 		int end = this.tokens.statementEnd(keyword);
 		if (end < 0) {
 			// Either a uniform block, which is already legal, or a declaration with no semicolon,
@@ -4944,11 +5011,57 @@ public final class GlslTranslator {
 		// there unread.
 		String format = opaque && LegacyGlsl.isImageType(type) ? imageFormat(parts, keywordAt) : "";
 		if (!readDeclarators(parts, cursor + 1, type, opaque ? String.join(" ", memory) : "", format,
-				opaque ? this.samplers : this.blockMembers)) {
+				opaque ? this.samplers : this.blockMembers, aliases)) {
 			return;
 		}
 
 		this.tokens.blankRange(start, end);
+	}
+
+	/**
+	 * A custom image can be written as an integer word and sampled as a normalised colour in a
+	 * different program. Keep those declarations distinct in the binding table; the encoded name
+	 * selects a compatible Vulkan view of the same memory, including on a cached translation.
+	 */
+	private void nameCustomImageViews() {
+		Map<String, String> renames = new LinkedHashMap<>();
+		Map<String, String> renamed = new LinkedHashMap<>();
+		this.samplers.forEach((name, declaration) -> {
+			String emitted = name;
+			var image = CustomImages.image(name);
+			if (image.isPresent()) {
+				String type = declaration.substring(0, declaration.indexOf(' '));
+				var base = image.get().internalFormat().used();
+				var requested = CustomImageView.requested(base, type, this.imageFormats.get(name));
+				if (requested.isPresent() && requested.get() != base) {
+					if (!CustomImageView.compatible(base, requested.get())) {
+						throw new IllegalArgumentException("Incompatible image view for " + name
+								+ ": " + base + " as " + requested.get());
+					}
+					emitted = new CustomImageView(name, requested.get()).name();
+					renames.put(name, emitted);
+					String qualifiers = this.memoryQualifiers.remove(name);
+					if (qualifiers != null) this.memoryQualifiers.put(emitted, qualifiers);
+					String format = this.imageFormats.remove(name);
+					if (format != null) this.imageFormats.put(emitted, format);
+					declaration = type + " " + emitted
+							+ declaration.substring(type.length() + 1 + name.length());
+				}
+			}
+			renamed.put(emitted, declaration);
+		});
+		if (renames.isEmpty()) return;
+		this.samplers.clear();
+		this.samplers.putAll(renamed);
+		for (int at = 0; at < this.tokens.size(); at++) {
+			Token token = this.tokens.get(at);
+			String replacement = renames.get(token.text());
+			if (replacement != null && token.kind() == Kind.IDENTIFIER && !token.macroName()
+					&& (token.directive() == null || "define".equals(token.directive()))) {
+				this.tokens.replace(at, replacement);
+			}
+		}
+		this.macroAliases.replaceAll((_, value) -> renames.getOrDefault(value, value));
 	}
 
 	/**
@@ -5520,6 +5633,11 @@ public final class GlslTranslator {
 	 */
 	private boolean readDeclarators(List<Integer> parts, int from, String type, String memory,
 			String format, Map<String, String> target) {
+		return readDeclarators(parts, from, type, memory, format, target, Map.of());
+	}
+
+	private boolean readDeclarators(List<Integer> parts, int from, String type, String memory,
+			String format, Map<String, String> target, Map<String, String> aliases) {
 		int cursor = from;
 		boolean any = false;
 
@@ -5533,15 +5651,16 @@ public final class GlslTranslator {
 				return false;
 			}
 
+			String name = liftedName(token.text(), aliases);
 			if (!memory.isEmpty()) {
-				this.memoryQualifiers.put(token.text(), memory);
+				this.memoryQualifiers.put(name, memory);
 			}
 
 			if (!format.isEmpty()) {
-				this.imageFormats.put(token.text(), format);
+				this.imageFormats.put(name, format);
 			}
 
-			StringBuilder declaration = new StringBuilder(type).append(' ').append(token.text());
+			StringBuilder declaration = new StringBuilder(type).append(' ').append(name);
 			cursor++;
 
 			while (cursor < parts.size() && this.tokens.get(parts.get(cursor)).operator("[")) {
@@ -5568,7 +5687,7 @@ public final class GlslTranslator {
 				}
 			}
 
-			record(target, token.text(), declaration.toString());
+			record(target, name, declaration.toString());
 			any = true;
 
 			if (cursor < parts.size() && this.tokens.get(parts.get(cursor)).operator(",")) {
@@ -5577,6 +5696,19 @@ public final class GlslTranslator {
 		}
 
 		return any;
+	}
+
+	/** A lifted declaration stands before the pack's defines, so it needs the name they spell out. */
+	private static String liftedName(String name, Map<String, String> aliases) {
+		String original = name;
+		Set<String> seen = new HashSet<>();
+		while (aliases.containsKey(name)) {
+			if (!seen.add(name)) {
+				return original;
+			}
+			name = aliases.get(name);
+		}
+		return name;
 	}
 
 	private void record(Map<String, String> target, String name, String declaration) {
@@ -5591,17 +5723,18 @@ public final class GlslTranslator {
 	 * The answers the header is written from, taken once every pass has run. Nothing here is
 	 * written back, which is why {@link Emitter} is handed these rather than this object.
 	 */
-	private Emitter emitter() {
+	private Emitter emitter(Map<String, String> memory, Map<String, String> formats) {
 		return new Emitter(this.stage, this.inputs, this.bound, this.alphaTest, this.extensions,
 				this.engineDefines,
-				this.memoryQualifiers, this.imageFormats, this.used, this.declaredNames,
+				memory, formats, this.used, this.declaredNames,
 				this.synthesized,
 				this.volumes.read(), this.packOutputs, this.maxFragmentOutput, this.owedOutputs,
 				this.splits, this.gameTextureMatrix,
 				this.gameModelView, this.softRewrites, this.trigCalls, this.hashCalls,
 				this.packBuiltinCalls, this.mainWrapped, this.depthEpilogue, this.terrainPrologue,
 				this.distantPrologue, this.entityWrapped, this.linesWrapped, this.alphaEpilogue, this.covers,
-				wrapsFragment(), this.ordered, this.namesFragDepth, this.makesOverlayColour);
+				wrapsFragment(), this.ordered, this.namesFragDepth, this.makesOverlayColour,
+				this.coreProfile);
 	}
 
 	/**
@@ -5660,8 +5793,11 @@ public final class GlslTranslator {
 			}
 
 			Token token = this.tokens.get(index);
-			if (token.kind() == Kind.IDENTIFIER && this.samplers.containsKey(token.text())) {
-				sampled.add(token.text());
+			if (token.kind() == Kind.IDENTIFIER) {
+				String name = liftedName(token.text(), this.macroAliases);
+				if (this.samplers.containsKey(name)) {
+					sampled.add(name);
+				}
 			}
 		}
 

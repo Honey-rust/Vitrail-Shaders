@@ -18,7 +18,6 @@ import dev.vitrail.Vitrail;
 
 import com.mojang.blaze3d.GpuDeviceLossException;
 import com.mojang.blaze3d.pipeline.RenderPipeline;
-import com.mojang.blaze3d.pipeline.RenderTarget;
 import com.mojang.blaze3d.systems.CommandEncoder;
 import com.mojang.blaze3d.systems.GpuDevice;
 import com.mojang.blaze3d.systems.RenderPass;
@@ -29,7 +28,6 @@ import com.mojang.blaze3d.textures.GpuTextureView;
 import com.mojang.blaze3d.vertex.DefaultVertexFormat;
 import com.mojang.blaze3d.vertex.VertexFormat;
 import com.mojang.blaze3d.vertex.VertexFormatElement;
-import net.minecraft.client.Minecraft;
 import net.minecraft.client.renderer.RenderPipelines;
 import net.minecraft.client.renderer.StagedVertexBuffer;
 import net.minecraft.client.renderer.rendertype.PreparedRenderType;
@@ -40,6 +38,7 @@ import java.io.IOException;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.Collection;
+import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
@@ -48,6 +47,7 @@ import java.util.Objects;
 import java.util.Optional;
 import java.util.OptionalDouble;
 import java.util.Set;
+import java.util.stream.Collectors;
 import java.util.stream.Stream;
 
 /**
@@ -285,10 +285,12 @@ public final class EntityDraw extends FamilyDraw {
 
 		/**
 		 * Whether this piece is drawn into the shadow map rather than into the picture, which is a
-		 * question about the program: the shadow table asks for one name and no row outside it does.
+		 * question about the program: the shadow table asks for three names and no row outside it
+		 * does.
 		 */
 		boolean shadow() {
-			return SHADOW_ENTITIES.equals(this.program);
+			return SHADOW_ENTITIES.equals(this.program) || SHADOW_CUTOUT.equals(this.program)
+					|| SHADOW_WATER.equals(this.program);
 		}
 
 		/**
@@ -314,6 +316,11 @@ public final class EntityDraw extends FamilyDraw {
 		@SuppressWarnings("ReferenceEquality")
 		boolean crumbling() {
 			return this.pipeline == RenderPipelines.CRUMBLING;
+		}
+
+		/** Whether this piece is a falling block or a block carried by a piston. */
+		boolean movingBlock() {
+			return EntityMesh.movingBlock(this.pipeline);
 		}
 
 		/**
@@ -350,7 +357,8 @@ public final class EntityDraw extends FamilyDraw {
 
 		/**
 		 * The format this piece is drawn from, which is the entity mesh for every row but the glint's
-		 * four, the crumbling's one, the three lines rows and the text's eight.
+		 * four, the crumbling's one, the three moving-block rows, the three lines rows and the text's
+		 * eight.
 		 * <p>
 		 * Derived from {@link #glint} and {@link #crumbling} rather than tabulated beside them, so
 		 * that a row and its format cannot drift: a row whose format did not match the pipeline it
@@ -362,7 +370,9 @@ public final class EntityDraw extends FamilyDraw {
 		 * of this engine's is built to bind, and it is what the game's own entity pipelines report
 		 * while the mesh carries. The rows are only ever read while it does, {@link #served} refusing
 		 * the whole family otherwise, so the two answers cannot be taken under different ones. The
-		 * others keep the game's, their elements being untouched by any of this.
+		 * moving-block one is {@link EntityMesh}'s too and on the same terms, the three pipelines a
+		 * moving block is drawn with reporting it while the mesh carries. The others keep the game's,
+		 * their elements being untouched by any of this.
 		 * <p>
 		 * <strong>The text is the one family here whose rows do not share a format</strong>, so its
 		 * eight are tabulated in {@link #TEXT_FORMATS} rather than answered by a branch. What
@@ -382,6 +392,10 @@ public final class EntityDraw extends FamilyDraw {
 			VertexFormat glyph = TEXT_FORMATS.get(this.pipeline);
 			if (glyph != null) {
 				return glyph;
+			}
+
+			if (movingBlock()) {
+				return EntityMesh.movingBlockFormat();
 			}
 
 			return crumbling() ? DefaultVertexFormat.BLOCK : EntityMesh.format();
@@ -423,6 +437,10 @@ public final class EntityDraw extends FamilyDraw {
 				return VertexInputs.CRUMBLING;
 			}
 
+			if (movingBlock()) {
+				return VertexInputs.MOVING_BLOCK;
+			}
+
 			if (lines()) {
 				return VertexInputs.LINES;
 			}
@@ -446,6 +464,10 @@ public final class EntityDraw extends FamilyDraw {
 
 			if (crumbling()) {
 				return "block breaking";
+			}
+
+			if (movingBlock()) {
+				return shadow() ? "moving blocks in the shadow map" : "moving blocks";
 			}
 
 			if (lines()) {
@@ -553,7 +575,7 @@ public final class EntityDraw extends FamilyDraw {
 		 * drifted would put a piece in the window where nothing is drawing it.
 		 */
 		boolean blended() {
-			return this.pipeline.getColorTargetState().blendFunction().isPresent();
+			return GraphicsApi.colorTarget(this.pipeline).blendFunction().isPresent();
 		}
 
 		/**
@@ -618,6 +640,11 @@ public final class EntityDraw extends FamilyDraw {
 	 */
 	private static final String BLOCK = "gbuffers_block";
 
+	/** The two opaque moving-block programs Iris assigns directly by pipeline. */
+	private static final String TERRAIN_SOLID = "gbuffers_terrain_solid";
+
+	private static final String TERRAIN_CUTOUT = "gbuffers_terrain_cutout";
+
 	/**
 	 * The blending half of each of those two names, which is what Iris's own {@code getTranslucent}
 	 * answers with: {@code ENTITIES_TRANSLUCENT} for a mob and {@code BE_TRANSLUCENT} for a block
@@ -677,17 +704,36 @@ public final class EntityDraw extends FamilyDraw {
 	 * ({@code pipeline/IrisPipelines.java:72-78}). It is served like its two neighbours, which is
 	 * what Iris does with every other pairing of those two words: the polygon offset changes the
 	 * depth the game nudges the quad by and nothing a pack reads.
+	 * <p>
+	 * <strong>Six on 26.3 and not eight.</strong> That game has no background pipeline, a text
+	 * display's box being submitted as text, so {@link GamePipelines} answers none for the two and
+	 * they are left out of this table and of the rows below alike.
 	 */
-	private static final Map<RenderPipeline, VertexFormat> TEXT_FORMATS = Map.of(
-			RenderPipelines.TEXT, DefaultVertexFormat.POSITION_TEX_LIGHTMAP_COLOR,
-			RenderPipelines.TEXT_GRAYSCALE, DefaultVertexFormat.POSITION_TEX_LIGHTMAP_COLOR,
-			RenderPipelines.TEXT_POLYGON_OFFSET, DefaultVertexFormat.POSITION_TEX_LIGHTMAP_COLOR,
-			RenderPipelines.TEXT_GRAYSCALE_POLYGON_OFFSET,
-			DefaultVertexFormat.POSITION_TEX_LIGHTMAP_COLOR,
-			RenderPipelines.TEXT_SEE_THROUGH, DefaultVertexFormat.POSITION_TEX_COLOR,
-			RenderPipelines.TEXT_GRAYSCALE_SEE_THROUGH, DefaultVertexFormat.POSITION_TEX_COLOR,
-			RenderPipelines.TEXT_BACKGROUND, DefaultVertexFormat.POSITION_COLOR_LIGHTMAP,
-			RenderPipelines.TEXT_BACKGROUND_SEE_THROUGH, DefaultVertexFormat.POSITION_COLOR);
+	private static final Map<RenderPipeline, VertexFormat> TEXT_FORMATS = textFormats();
+
+	private static Map<RenderPipeline, VertexFormat> textFormats() {
+		Map<RenderPipeline, VertexFormat> formats = new HashMap<>();
+		formats.put(RenderPipelines.TEXT, DefaultVertexFormat.POSITION_TEX_LIGHTMAP_COLOR);
+		formats.put(RenderPipelines.TEXT_GRAYSCALE, DefaultVertexFormat.POSITION_TEX_LIGHTMAP_COLOR);
+		formats.put(RenderPipelines.TEXT_POLYGON_OFFSET,
+				DefaultVertexFormat.POSITION_TEX_LIGHTMAP_COLOR);
+		formats.put(RenderPipelines.TEXT_GRAYSCALE_POLYGON_OFFSET,
+				DefaultVertexFormat.POSITION_TEX_LIGHTMAP_COLOR);
+		formats.put(RenderPipelines.TEXT_SEE_THROUGH, DefaultVertexFormat.POSITION_TEX_COLOR);
+		formats.put(RenderPipelines.TEXT_GRAYSCALE_SEE_THROUGH, DefaultVertexFormat.POSITION_TEX_COLOR);
+
+		RenderPipeline background = GamePipelines.textBackground();
+		if (background != null) {
+			formats.put(background, DefaultVertexFormat.POSITION_COLOR_LIGHTMAP);
+		}
+
+		RenderPipeline seeThrough = GamePipelines.textBackgroundSeeThrough();
+		if (seeThrough != null) {
+			formats.put(seeThrough, DefaultVertexFormat.POSITION_COLOR);
+		}
+
+		return Map.copyOf(formats);
+	}
 
 	/**
 	 * The three of those eight whose font sheet holds ONE channel, and which the game therefore
@@ -748,13 +794,18 @@ public final class EntityDraw extends FamilyDraw {
 	 * the one thing that puts Iris's own {@code getText} in a hand pass, and it puts a GLYPH row
 	 * there and not one of these two: nothing but a text display reaches the two backgrounds, and no
 	 * text display is drawn inside a hand pass.
+	 * <p>
+	 * Three on 26.3, which has no background pipeline to pin: the box is text there, and the text
+	 * rows are not pinned on either game.
 	 */
-	private static final Set<RenderPipeline> PINNED = Set.of(
+	private static final Set<RenderPipeline> PINNED = Stream.of(
 			RenderPipelines.END_CRYSTAL_BEAM,
 			RenderPipelines.ENTITY_CUTOUT_Z_OFFSET,
 			RenderPipelines.ENERGY_SWIRL,
-			RenderPipelines.TEXT_BACKGROUND,
-			RenderPipelines.TEXT_BACKGROUND_SEE_THROUGH);
+			GamePipelines.textBackground(),
+			GamePipelines.textBackgroundSeeThrough())
+			.filter(Objects::nonNull)
+			.collect(Collectors.toUnmodifiableSet());
 
 	/**
 	 * Every pipeline whose draws walk the entity program names, in the two runs the game sorts its
@@ -850,7 +901,9 @@ public final class EntityDraw extends FamilyDraw {
 				CUTOUT));
 		put(new Element(RenderPipelines.ENTITY_TRANSLUCENT_CULL, "translucent_cull",
 				ENTITIES_TRANSLUCENT, CUTOUT));
-		put(new Element(RenderPipelines.ARMOR_TRANSLUCENT, "armor_translucent", ENTITIES_TRANSLUCENT,
+		// The cracks over a wolf's armour, which 26.3 renamed after that one caller and left the same
+		// pipeline under the same location; GamePipelines names it on each game.
+		put(new Element(GamePipelines.armorTranslucent(), "armor_translucent", ENTITIES_TRANSLUCENT,
 				CUTOUT));
 		put(new Element(RenderPipelines.ITEM_TRANSLUCENT, "item_translucent", ENTITIES_TRANSLUCENT,
 				CUTOUT));
@@ -898,11 +951,18 @@ public final class EntityDraw extends FamilyDraw {
 		// holds to their own program: Iris keys them on a constant where the six above go through
 		// getText. Not a name plate's box, which is an effect over the font's white glyph and comes
 		// in on the six above with the letters it sits behind; the two render types below have one
-		// caller in the client and it is DisplayRenderer.TextDisplayRenderer.
-		put(new Element(RenderPipelines.TEXT_BACKGROUND, "text_background", ENTITIES_TRANSLUCENT,
-				CUTOUT));
-		put(new Element(RenderPipelines.TEXT_BACKGROUND_SEE_THROUGH, "text_background_see_through",
-				ENTITIES_TRANSLUCENT, CUTOUT));
+		// caller in the client and it is DisplayRenderer.TextDisplayRenderer. Neither exists on 26.3,
+		// which submits that box as text, so there it arrives on the six rows above.
+		RenderPipeline background = GamePipelines.textBackground();
+		if (background != null) {
+			put(new Element(background, "text_background", ENTITIES_TRANSLUCENT, CUTOUT));
+		}
+
+		RenderPipeline seeThrough = GamePipelines.textBackgroundSeeThrough();
+		if (seeThrough != null) {
+			put(new Element(seeThrough, "text_background_see_through", ENTITIES_TRANSLUCENT,
+					CUTOUT));
+		}
 	}
 
 	/**
@@ -1063,12 +1123,19 @@ public final class EntityDraw extends FamilyDraw {
 				.forEach(element -> into.put(element.pipeline(), element));
 	}
 
-	/** What everything submitted through the feature renderers asks for, seen from the light. */
+	/** What ordinary entity feature geometry asks for, seen from the light. */
 	private static final String SHADOW_ENTITIES = "shadow_entities";
 
+	/** What solid and cutout moving blocks ask for in the shadow map. */
+	private static final String SHADOW_CUTOUT = "shadow_cutout";
+
+	/** What translucent moving blocks ask for in the shadow map. */
+	private static final String SHADOW_WATER = "shadow_water";
+
 	/**
-	 * The same pieces again as the shadow map sees them, which is ONE program for the lot and not the
-	 * three the camera uses.
+	 * The same pieces again as the shadow map sees them. Ordinary entity and block-entity feature
+	 * geometry shares {@code shadow_entities}; moving blocks keep Iris's dedicated
+	 * {@code shadow_cutout} or {@code shadow_water} choice instead.
 	 * <p>
 	 * <strong>The block entities lose their own name here, and that is Iris's answer and not a
 	 * simplification.</strong> Its shadow table is keyed on the pipeline like its main one, and every
@@ -1138,8 +1205,17 @@ public final class EntityDraw extends FamilyDraw {
 				// compiled module nothing selects.
 				.filter(mob -> mob.pipeline() != RenderPipelines.ENTITY_SHADOW
 						&& mob.pipeline() != RenderPipelines.CRUMBLING && !mob.lines())
-				.map(mob -> new Element(mob.pipeline(), "shadow_" + mob.element(), SHADOW_ENTITIES,
-						mob.text() ? AlphaTest.NON_ZERO : CUTOUT, RenderStage.ENTITIES, false))
+				.map(mob -> {
+					if (!mob.movingBlock()) {
+						return new Element(mob.pipeline(), "shadow_" + mob.element(), SHADOW_ENTITIES,
+							mob.text() ? AlphaTest.NON_ZERO : CUTOUT, RenderStage.ENTITIES, false);
+					}
+
+					String program = RenderPipelines.TRANSLUCENT_BLOCK.equals(mob.pipeline())
+							? SHADOW_WATER : SHADOW_CUTOUT;
+					return new Element(mob.pipeline(), "shadow_" + mob.element(), program, CUTOUT,
+							RenderStage.ENTITIES, false);
+				})
 				.forEach(element -> SHADOW_ELEMENTS.put(element.pipeline(), element));
 	}
 
@@ -1355,6 +1431,15 @@ public final class EntityDraw extends FamilyDraw {
 		// reading renderStage here reads what it reads there.
 		FIXED.put(RenderPipelines.CRUMBLING, new Element(RenderPipelines.CRUMBLING, "crumbling",
 				DAMAGED_BLOCK, CUTOUT, RenderStage.NONE, false, true));
+		// MovingBlockFeatureRenderer uses these three pipelines for falling blocks and blocks carried
+		// by pistons. Iris assigns them directly rather than consulting the entity, block-entity or
+		// hand phase (IrisPipelines.java:25-30), so they belong in this fixed table too.
+		FIXED.put(RenderPipelines.SOLID_BLOCK, new Element(RenderPipelines.SOLID_BLOCK,
+				"moving_solid", TERRAIN_SOLID, AlphaTest.OFF));
+		FIXED.put(RenderPipelines.CUTOUT_BLOCK, new Element(RenderPipelines.CUTOUT_BLOCK,
+				"moving_cutout", TERRAIN_CUTOUT, AlphaTest.CUTOUT));
+		FIXED.put(RenderPipelines.TRANSLUCENT_BLOCK, new Element(RenderPipelines.TRANSLUCENT_BLOCK,
+				"moving_translucent", BLOCK, CUTOUT));
 		// The three lines pipelines Iris keys to the line program (pipeline/IrisPipelines.java:40-42),
 		// no alpha test (ShaderKey.java:72). The fourth built on the same snippet, LINES_DEPTH_BIAS
 		// (RenderPipelines.java:574-580), Iris keys to nothing and neither does this. Under
@@ -1665,13 +1750,13 @@ public final class EntityDraw extends FamilyDraw {
 	 * other than the main one ({@code rendertype/RenderTypes.java:25,141,167,260,324,345,352,359,397}),
 	 * none is built on a pipeline of the opaque table, so every opaque row named the main target
 	 * before and resolves to it now.
+	 * <p>
+	 * 26.3 names no target on a render type at all, and {@link GameRender#drawsOnMainTarget} asks
+	 * the same question there in that game's terms: what goes elsewhere under its improved
+	 * transparency is what it draws through the order independent passes.
 	 */
-	@SuppressWarnings("ReferenceEquality")
 	private static boolean onMainTarget(PreparedRenderType prepared) {
-		Minecraft minecraft = Minecraft.getInstance();
-		RenderTarget main = minecraft == null ? null : minecraft.gameRenderer.mainRenderTarget();
-
-		return main != null && prepared.outputTarget().getRenderTarget() == main;
+		return GameRender.drawsOnMainTarget(prepared);
 	}
 
 	/** What closing either window costs, which is the same two things. */
@@ -1768,8 +1853,8 @@ public final class EntityDraw extends FamilyDraw {
 		boolean inMoment = (element != null && element.hand()) ? HandDraw.wanted()
 				: wanted && element != null && inWindow(element);
 		// And the mesh has to be carrying, whatever the moment says. Every row but the glint's, the
-		// crumbling's, the lines' and the text's is read against EntityMesh.format, so a draw served
-		// before the mesh settled would bind fifty-six bytes of layout over a vertex of thirty-six.
+		// crumbling's, the lines' and the text's is read against one of EntityMesh's two formats, so
+		// a draw served before the mesh settled would bind a wider layout over the game's vertex.
 		// It lasts from the load that asked until the extract that rebuilds the world, which is one
 		// frame in the ordinary case.
 		//
@@ -1800,9 +1885,11 @@ public final class EntityDraw extends FamilyDraw {
 			// like six of the entity ones, so a key on the target alone would let whichever came first
 			// speak for both and the log would never say the glint went back too. Keying on the piece
 			// instead would say it once per row, which is six lines for the one thing that happened.
+			String target = GameRender.drawTargetName(prepared);
+
 			return draw.refuse(element, "elsewhere:" + (element.glint() ? "glint" : "entity") + ":"
-					+ prepared.outputTarget(), true, "the game sends it to "
-					+ prepared.outputTarget() + ", which it composes itself afterwards, and the pack's "
+					+ target, true, "the game sends it to "
+					+ target + ", which it composes itself afterwards, and the pack's "
 					+ "colour targets cannot be attached beside a picture this engine has not got. It "
 					+ "is the game's improved transparency that allocates those targets, and this "
 					+ "engine turns that option off when the pack is loaded, as Iris does when shaders "
@@ -1922,7 +2009,7 @@ public final class EntityDraw extends FamilyDraw {
 						: texture.textureView(),
 				texture == null ? null : texture.sampler());
 
-		this.open.setPipeline(this.bound);
+		GraphicsApi.setPipeline(this.open, this.bound);
 		scissor(prepared.scissorState());
 		program.bind(this.open);
 
@@ -2006,15 +2093,10 @@ public final class EntityDraw extends FamilyDraw {
 
 		// The two images the game would have drawn into, worked out as PreparedRenderType works them
 		// out: the overrides are the game's own way of sending a phase somewhere else, and the layer
-		// that carries its translucent features is one of them.
-		RenderTarget target = prepared.outputTarget().getRenderTarget();
-		GpuTextureView colour = RenderSystem.outputColorTextureOverride != null
-				? RenderSystem.outputColorTextureOverride
-				: target.getColorTextureView();
-		GpuTextureView depth = !target.useDepth ? null
-				: RenderSystem.outputDepthTextureOverride != null
-						? RenderSystem.outputDepthTextureOverride
-						: target.getDepthTextureView();
+		// that carries its translucent features is one of them. On 26.3 there are no overrides and
+		// the answer is the main target, GameRender carrying why.
+		GpuTextureView colour = GameRender.drawColour(prepared);
+		GpuTextureView depth = GameRender.drawDepth(prepared);
 
 		RenderPassDescriptor descriptor = program.descriptor(colour, depth);
 		if (descriptor == null && element.shadow()) {
@@ -2286,8 +2368,8 @@ public final class EntityDraw extends FamilyDraw {
 		}
 
 		// One group for the whole shadow table, where the picture takes two: the map has no deferred
-		// stage to stand either side of and one program name for the lot, so there is no line inside
-		// it for a half to fall on.
+		// stage to stand either side of, and every row writes the same shadow image even though moving
+		// blocks now ask for their own shadow program names.
 		//
 		// Asked for only where the pack draws something through the feature renderers at all. A pack
 		// that keeps the entities and the block entities out of its map wants no shadow_entities read,
@@ -2385,7 +2467,7 @@ public final class EntityDraw extends FamilyDraw {
 				.toList();
 	}
 
-	/** The fixed rows this engine can decode the mesh of, which today is all six of them. */
+	/** The fixed rows this engine can decode the mesh of, which today is every one of them. */
 	private static List<Element> fixed() {
 		return FIXED.values().stream().filter(EntityDraw::decodable).toList();
 	}

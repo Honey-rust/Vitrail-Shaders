@@ -488,9 +488,19 @@ public final class PackChain {
 				ordered(chain.chain()).stream().map(ChainPlan.Pass::program)
 						.collect(Collectors.toSet()),
 				Set.copyOf(chain.targets().passing()));
-		// Before the first frame allocates a target: the usage a compute needs is baked into the
-		// image at creation, and nothing can add it afterwards.
-		this.targets.storageTargets(this.compute.storageTargets());
+		// Before the first frame allocates a target: the storage usage is baked into the image at
+		// creation, and nothing can add it afterwards. Whatever stores into a target asks for it: a
+		// compute, a full screen program, read off their translated text, and a world program,
+		// which is only translated when first drawn and so is read off the pack's text instead.
+		Set<Integer> stored = new LinkedHashSet<>(this.compute.storageTargets());
+		stored.addAll(chain.targets().stored());
+		for (ChainPlan.Pass pass : ordered(chain.chain())) {
+			PackProgram.Loaded loaded = chain.programs().get(pass.program());
+			if (loaded != null) {
+				stored.addAll(PackPass.colourImages(loaded));
+			}
+		}
+		this.targets.storageTargets(stored);
 	}
 
 	/**
@@ -1386,7 +1396,8 @@ public final class PackChain {
 
 		openTargets(device);
 
-		return new Ready(main, mainView, main.useDepth ? main.getDepthTextureView() : null, seeding);
+		return new Ready(main, mainView, GraphicsApi.hasDepth(main) ? main.getDepthTextureView() : null,
+				seeding);
 	}
 
 	/**
@@ -1925,6 +1936,10 @@ public final class PackChain {
 	 * goes to the layer; the depth keeps pointing at the world's, so the redirected draws still
 	 * hide behind terrain and still leave the depth the water reads untouched.
 	 * <p>
+	 * <strong>That switch is 26.2's and {@link GameRender} is where it is thrown.</strong> 26.3
+	 * removed it, and there the switch is a pass of its own opened on the layer and the world's
+	 * depth, which the level renderer hands the game's translucent phase in place of its own.
+	 * <p>
 	 * Nothing is redirected while the chain is still compiling, and that refusal is the same one the
 	 * terrain makes through {@code TerrainDraw.shown()}. What the layer is composed onto is a colour
 	 * target of the pack, and only the final brings that back: caught during the warm up, the
@@ -1935,8 +1950,10 @@ public final class PackChain {
 		PackChain chain = active;
 		GpuDevice device = RenderSystem.tryGetDevice();
 		Minecraft minecraft = Minecraft.getInstance();
+		// The game's answer is asked last, after everything that is this engine's own: a game that
+		// cannot redirect says so in the log once, and only where there was something to redirect.
 		if (disabled || chain == null || device == null || minecraft == null || !chainWanted
-				|| chain.features == null) {
+				|| chain.features == null || !GameRender.redirectsFeatures()) {
 			return;
 		}
 
@@ -1960,16 +1977,14 @@ public final class PackChain {
 				return;
 			}
 
-			RenderSystem.outputColorTextureOverride = layer;
-			RenderSystem.outputDepthTextureOverride = main.getDepthTextureView();
+			GameRender.redirectFeatures(layer, main.getDepthTextureView());
 			chain.redirected = true;
 		} catch (GpuDeviceLossException e) {
 			throw e;
 		} catch (RuntimeException e) {
 			// The overrides are cleared on the way out rather than left half set: one standing past
 			// this point swallows every later feature draw of the frame.
-			RenderSystem.outputColorTextureOverride = null;
-			RenderSystem.outputDepthTextureOverride = null;
+			GameRender.endFeatureRedirect();
 			chain.redirected = false;
 			stop();
 			Vitrail.logger().error("Vitrail stopped drawing this pack after an error", e);
@@ -2055,8 +2070,7 @@ public final class PackChain {
 	public static void closeFeatures() {
 		// Always put back, whatever else happens below: overrides left standing past this point
 		// would swallow every later feature draw of the frame.
-		RenderSystem.outputColorTextureOverride = null;
-		RenderSystem.outputDepthTextureOverride = null;
+		GameRender.endFeatureRedirect();
 
 		PackChain chain = active;
 		if (chain == null || !chain.redirected) {
@@ -2895,7 +2909,7 @@ public final class PackChain {
 	 * engine that has just decided to draw nothing.
 	 */
 	private boolean valid(CompiledRenderPipeline compiled, PackPass pass) {
-		if (compiled.isValid()) {
+		if (GraphicsApi.valid(compiled)) {
 			return true;
 		}
 

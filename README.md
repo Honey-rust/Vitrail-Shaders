@@ -59,7 +59,8 @@ are where I answer.
 
 ## Quick start
 
-- One jar for Fabric and NeoForge, on Minecraft 26.2. On
+- One jar for Fabric and NeoForge, on Minecraft 26.2, and one for 26.3 built
+  from the same tree with `gradlew build -Pminecraft=26.3`. The 26.2 jar is on
   [CurseForge](https://www.curseforge.com/minecraft/mc-mods/vitrail-shaders), on
   [Modrinth](https://modrinth.com/mod/vitrail-shaders) and on every
   [release](https://github.com/avpbynf/Vitrail-Shaders/releases) here.
@@ -74,7 +75,7 @@ looks like.
 
 ## What goes through your pack
 
-Terrain, water, shadows, sky, clouds, weather, particles, mobs, block entities,
+Terrain, moving blocks, water, shadows, sky, clouds, weather, particles, mobs, block entities,
 the held hand, and the far terrain of Distant Horizons given a build of that mod
 that draws on this backend, which [Other mods](INSTALL.md#other-mods) names. The
 settings screen reads the pack's own menu layout, and a resource pack's normal

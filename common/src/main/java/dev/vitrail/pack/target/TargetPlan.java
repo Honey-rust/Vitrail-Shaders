@@ -11,6 +11,7 @@ import dev.vitrail.pack.program.ChainFilter;
 import dev.vitrail.pack.model.ProgramNames;
 import dev.vitrail.pack.program.ProgramSet;
 import dev.vitrail.pack.model.ProgramStage;
+import dev.vitrail.pack.source.BlockComments;
 import dev.vitrail.pack.source.DimensionSet;
 import dev.vitrail.pack.source.IncludeExpander;
 import dev.vitrail.pack.source.ShaderPackSource;
@@ -120,6 +121,9 @@ public final class TargetPlan {
 	private static final Pattern IMAGE = Pattern.compile(
 			"^\\s*(?:" + IMAGE_QUALIFIER + ")*uniform\\s+(?:" + IMAGE_QUALIFIER
 					+ "|(?:lowp|mediump|highp)\\s+)*([iu]?image\\w*)\\s+([^;]*);.*$");
+	private static final Pattern NAME_ALIAS = Pattern.compile(
+			"^\\s*#\\s*define\\s+([A-Za-z_]\\w*)\\s+([A-Za-z_]\\w*)(?:\\s*(?://.*)?)?$");
+	private static final Pattern NAME_UNDEF = Pattern.compile("^\\s*#\\s*undef\\s+([A-Za-z_]\\w*)\\s*$");
 
 	private static final String FINAL = "final";
 
@@ -142,6 +146,7 @@ public final class TargetPlan {
 	private final TargetDirectives directives;
 	private final TargetSchedule schedule;
 	private final Set<Integer> written;
+	private final Set<Integer> stored;
 	private final Set<Integer> sampled;
 	private final Set<Integer> allocated;
 	private final int shadowCeiling;
@@ -195,6 +200,7 @@ public final class TargetPlan {
 		this.computes = List.copyOf(draft.computes);
 		this.passing = List.copyOf(draft.passing);
 		this.written = Collections.unmodifiableSet(new TreeSet<>(draft.written));
+		this.stored = Collections.unmodifiableSet(new TreeSet<>(draft.stored));
 		this.sampled = Collections.unmodifiableSet(new TreeSet<>(draft.sampled));
 
 		TreeSet<Integer> allocated = new TreeSet<>(draft.written);
@@ -853,12 +859,13 @@ public final class TargetPlan {
 			// the light's own geometry at :746, and the one place it does not is the shadow
 			// COMPOSITES, which this walk has already skipped above.
 			//
-			// What this ALLOCATES for, nothing here yet BINDS for: the image behind colorimgN is
-			// pushed for a compute and for nothing else, so iterationT's line program stores into
-			// an image no descriptor carries. That is a gap of its own, older than this, and the
-			// allocation is right whether or not it is closed: the reference opens the target on
-			// the declaration alone.
-			draft.written.addAll(colourImages(unit));
+			// A graphics program and a compute bind this same allocated target through a storage
+			// descriptor. The declaration is still what allocates it: the reference opens the
+			// target on the declaration alone, before either kind of program runs. It is also
+			// what creates it writable, the storage usage being baked into the image.
+			Set<Integer> stores = colourImages(unit);
+			draft.written.addAll(stores);
+			draft.stored.addAll(stores);
 
 			// A full screen program reads colortex0 under every name nothing else answers for, which
 			// is what SamplerPlan gives it and why Iris hands its default sampler the first colour
@@ -965,12 +972,24 @@ public final class TargetPlan {
 	private static List<Declaration> declared(ExpandedUnit unit, Pattern pattern) {
 		List<Declaration> names = new ArrayList<>();
 		List<String> lines = unit.lines();
+		Map<String, String> aliases = new LinkedHashMap<>();
 		boolean commented = false;
 
 		for (int line = 0; line < lines.size(); line++) {
 			boolean opened = commented;
-			commented = afterLine(lines.get(line), commented);
+			commented = BlockComments.openAfter(lines.get(line), commented);
 			if (opened || !unit.isLive(line)) {
+				continue;
+			}
+
+			Matcher alias = NAME_ALIAS.matcher(lines.get(line));
+			if (alias.matches()) {
+				aliases.put(alias.group(1), alias.group(2));
+				continue;
+			}
+			Matcher undefinition = NAME_UNDEF.matcher(lines.get(line));
+			if (undefinition.matches()) {
+				aliases.remove(undefinition.group(1));
 				continue;
 			}
 
@@ -988,35 +1007,22 @@ public final class TargetPlan {
 				}
 
 				if (!name.isEmpty()) {
-					names.add(new Declaration(name, type));
+					String original = name;
+					Set<String> seen = new HashSet<>();
+					boolean cycle = false;
+					while (aliases.containsKey(name)) {
+						if (!seen.add(name)) {
+							cycle = true;
+							break;
+						}
+						name = aliases.get(name);
+					}
+					names.add(new Declaration(cycle ? original : name, type));
 				}
 			}
 		}
 
 		return names;
-	}
-
-	/**
-	 * Whether a block comment is still open once this line has been read. A line comment closes at
-	 * the end of the line and so ends the walk of it; inside a block, neither form opens anything
-	 * and only the closing pair is looked for.
-	 */
-	private static boolean afterLine(String line, boolean commented) {
-		for (int at = 0; at < line.length() - 1; at++) {
-			if (commented) {
-				if (line.charAt(at) == '*' && line.charAt(at + 1) == '/') {
-					commented = false;
-					at++;
-				}
-			} else if (line.charAt(at) == '/' && line.charAt(at + 1) == '/') {
-				return false;
-			} else if (line.charAt(at) == '/' && line.charAt(at + 1) == '*') {
-				commented = true;
-				at++;
-			}
-		}
-
-		return commented;
 	}
 
 	public String packName() {
@@ -1082,6 +1088,14 @@ public final class TargetPlan {
 
 	public Set<Integer> written() {
 		return this.written;
+	}
+
+	/**
+	 * The targets some fragment stage of this place stores into as {@code colorimgN}, the
+	 * geometry drawn from the light included, read off the pack's text at load.
+	 */
+	public Set<Integer> stored() {
+		return this.stored;
 	}
 
 	public Set<Integer> sampled() {
@@ -1603,6 +1617,7 @@ public final class TargetPlan {
 		private final List<String> unreachableComputes = new ArrayList<>();
 		private final Set<String> shadowComposites = new TreeSet<>();
 		private final Set<Integer> written = new TreeSet<>();
+		private final Set<Integer> stored = new TreeSet<>();
 		private final Set<Integer> sampled = new TreeSet<>();
 
 		/** Shadow colour buffers a program of the place draws into or reads. */

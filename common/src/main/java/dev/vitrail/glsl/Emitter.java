@@ -45,7 +45,8 @@ record Emitter(ProgramStage stage, VertexInputs inputs, List<String> bound, Alph
 		boolean mainWrapped, boolean depthEpilogue, boolean terrainPrologue,
 		boolean distantPrologue, boolean entityWrapped, boolean linesWrapped,
 		boolean alphaEpilogue, boolean covers,
-		boolean wrapsFragment, boolean ordered, boolean namesFragDepth, boolean makesOverlayColour) {
+		boolean wrapsFragment, boolean ordered, boolean namesFragDepth, boolean makesOverlayColour,
+		boolean coreProfile) {
 
 	private static final String VERSION = "#version 460 core";
 
@@ -114,7 +115,7 @@ record Emitter(ProgramStage stage, VertexInputs inputs, List<String> bound, Alph
 		// once per draw and ours is written once per run, which is the whole reason a matrix that
 		// changes with the draw is read from over there.
 		if (this.gameTextureMatrix > 0 || this.gameModelView > 0) {
-			lines.addAll(LegacyGlsl.GAME_TRANSFORMS_BLOCK);
+			lines.addAll(GameTransforms.BLOCK);
 		}
 
 		// Written here, in the order the program handed over, rather than left in the body. The
@@ -130,7 +131,12 @@ record Emitter(ProgramStage stage, VertexInputs inputs, List<String> bound, Alph
 			switch (this.inputs) {
 				case FULLSCREEN -> {
 					lines.addAll(LegacyGlsl.FULLSCREEN_ATTRIBUTES);
-					lines.addAll(VertexPrologue.tail(this.used, this.synthesized));
+					VertexPrologue.globals(this.used, this.synthesized, Map.of()).forEach((name, type) -> {
+						String element = this.coreProfile ? LegacyGlsl.fullscreenElement(name, type) : null;
+						lines.add(element != null
+								? "#define " + name + " " + element
+								: VertexPrologue.declaration(name, type));
+					});
 				}
 				case TERRAIN, TERRAIN_SEPARATE_AO -> lines.addAll(SodiumVertex.prologue(this.bound,
 						this.used, this.synthesized, this.inputs.separateAo()));
@@ -138,6 +144,8 @@ record Emitter(ProgramStage stage, VertexInputs inputs, List<String> bound, Alph
 						EntityVertex.prologue(this.used, this.synthesized, this.inputs.fullbright()));
 				case GLINT -> lines.addAll(GlintVertex.prologue(this.used, this.synthesized));
 				case CRUMBLING -> lines.addAll(CrumblingVertex.prologue(this.used, this.synthesized));
+				case MOVING_BLOCK -> lines.addAll(
+						MovingBlockVertex.prologue(this.used, this.synthesized));
 				case GLYPH -> lines.addAll(
 						GlyphVertex.prologue(this.bound, this.used, this.synthesized));
 				case LINES -> {
@@ -256,6 +264,16 @@ record Emitter(ProgramStage stage, VertexInputs inputs, List<String> bound, Alph
 		// is folded to a quarter turn and fed to the odd polynomial. Measured on the hash's own
 		// yardstick: a single-constant reduction leaves a field the uniformity test rejects at 427
 		// where white noise scores 15, and this form scores 11 to 14, alongside the reference.
+		//
+		// The result is clamped to one, because the reduction only keeps the residue within a half
+		// turn up to arguments of some tens of millions. Past that the residue grows with the
+		// argument, the polynomial returns values above one, and further out its square overflows
+		// and the sine is infinite, where the driver's own stays within one. A parallax march
+		// comparing against a wave height built on such a sine then runs for billions of turns or
+		// forever, and the device is lost: Photon's water at a grazing view, whose step divides by
+		// the view's tiny component along the normal. Every value the helper already gave within
+		// one is left as it was; the others, which carry nothing of the argument any more, become
+		// plus or minus one.
 		if (this.trigCalls > 0) {
 			for (String shape : new String[] {"float", "vec2", "vec3", "vec4"}) {
 				lines.add(shape + " " + GlslTranslator.REDUCED_SIN + "(" + shape + " ofX) {"
@@ -265,8 +283,8 @@ record Emitter(ProgramStage stage, VertexInputs inputs, List<String> bound, Alph
 						+ " " + shape + " ofS = sign(ofR);"
 						+ " " + shape + " ofA = 1.5707964 - abs(abs(ofR) - 1.5707964);"
 						+ " " + shape + " ofZ = ofA * ofA;"
-						+ " return ofS * ofA * (1.0 + ofZ * (-1.6666654611e-1"
-						+ " + ofZ * (8.3321608736e-3 + ofZ * (-1.9515295891e-4)))); }");
+						+ " return clamp(ofS * ofA * (1.0 + ofZ * (-1.6666654611e-1"
+						+ " + ofZ * (8.3321608736e-3 + ofZ * (-1.9515295891e-4)))), -1.0, 1.0); }");
 				lines.add(shape + " " + GlslTranslator.REDUCED_COS + "(" + shape + " ofX) {"
 						+ " return " + GlslTranslator.REDUCED_SIN + "(ofX + 1.5707964); }");
 			}
@@ -645,14 +663,12 @@ record Emitter(ProgramStage stage, VertexInputs inputs, List<String> bound, Alph
 	 * only way to stay on the same side of that. It is also the only answer there is for a colour
 	 * target written as {@code colorimgN}, which no directive names.
 	 * <p>
-	 * The two words are not the same statement. The one in the shader is the format the SPIR-V
-	 * declares its loads and stores with; the {@code image.} directive is the format of the image
-	 * the chain binds under that name. A pack whose two disagree is asking for a reinterpretation
-	 * nothing promised it, and it is no better off under Iris, which binds the texture under its own
-	 * internal format and leaves the shader the word it wrote
-	 * ({@code samplers/IrisImages.java:39-41}), so the access format and the declared one part
-	 * company there as well. No pack of the corpus writes a word its own directive contradicts, so
-	 * this order is choosing between two spellings of one format rather than between two formats.
+	 * For custom images, a different compatible shader format selects a typed Vulkan view of
+	 * the same allocation. GlslTranslator has already encoded that view in the uniform name, so
+	 * the explicit shader format and the bound view agree even after a translation cache hit.
+	 * This preserves the bits a pack writes atomically through an integer view and later reads
+	 * through its float or normalised sampler. A different texel size is rejected during
+	 * translation; there is no implicit conversion or second image.
 	 * <p>
 	 * The memory qualifiers are written back for the same reason, and they are what carries a
 	 * declaration the pack left bare: a pack switches its images off with the setting that
