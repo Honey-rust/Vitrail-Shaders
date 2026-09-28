@@ -18,7 +18,7 @@ import java.util.List;
 import java.util.Optional;
 import java.util.OptionalDouble;
 
-/** Basic opaque LOD rendering when no shader pack is active. Called before vanilla terrain. */
+/** Basic LOD rendering when no shader pack is active. Composited against vanilla world depth. */
 final class PlainDistantDraw {
     private static final Identifier SHADER = Identifier.fromNamespaceAndPath(Vitrail.MOD_ID, "plain_lod");
     private static final Identifier DETAIL_SHADER = Identifier.fromNamespaceAndPath(Vitrail.MOD_ID, "plain_lod_detail");
@@ -37,12 +37,14 @@ final class PlainDistantDraw {
         out float distanceToCamera;
         #endif
 
-        layout(std140) uniform PlainLod { mat4 mvp; vec4 offset; };
+        layout(std140) uniform PlainLod { mat4 mvp; mat4 vanillaMvp; vec4 offset; };
         uniform sampler2D Lightmap;
         out vec4 colour;
+        out vec4 vanillaClip;
         void main() {
             vec3 relative = vec3(vPosition) + offset.xyz;
             gl_Position = mvp * vec4(relative, 1.0);
+            vanillaClip = vanillaMvp * vec4(relative, 1.0);
             vec2 lightUv = (vec2((meta >> 4u) & 15u, meta & 15u) + 0.5) / 16.0;
             colour = vec4(vColor.rgb * textureLod(Lightmap, lightUv, 0.0).rgb, vColor.a);
             #ifdef TEXTURED
@@ -56,6 +58,8 @@ final class PlainDistantDraw {
     private static final String FRAGMENT = """
         #version 460 core
         in vec4 colour;
+        in vec4 vanillaClip;
+        uniform sampler2D MainDepth;
         #ifdef TEXTURED
         uniform sampler2D LodAtlas;
         in vec2 uv;
@@ -65,6 +69,9 @@ final class PlainDistantDraw {
         #endif
         layout(location=0) out vec4 fragColour;
         void main() {
+            float sceneDepth = texelFetch(MainDepth, ivec2(gl_FragCoord.xy), 0).r;
+            float vanillaDepth = vanillaClip.z / vanillaClip.w;
+            if (sceneDepth > 0.0 && sceneDepth >= vanillaDepth - 0.000001) discard;
             fragColour = colour;
             #ifdef TEXTURED
             vec2 pixel = vec2(tile % 16u, tile / 16u) * 16.0 + clamp(fract(uv) * 16.0, 0.5, 15.5);
@@ -117,8 +124,8 @@ final class PlainDistantDraw {
                                 (opaque ? "plain_lod_opaque" : "plain_lod_translucent") + (detailed ? "_detail" : "")))
                         .withVertexShader(detailed ? DETAIL_SHADER : SHADER).withFragmentShader(detailed ? DETAIL_SHADER : SHADER)
                         .withBindGroupLayout(detailed
-                                ? GraphicsApi.blockAndSamplers("PlainLod", "Lightmap", "LodAtlas")
-                                : GraphicsApi.blockAndSamplers("PlainLod", "Lightmap"))
+                                ? GraphicsApi.blockAndSamplers("PlainLod", "Lightmap", "MainDepth", "LodAtlas")
+                                : GraphicsApi.blockAndSamplers("PlainLod", "Lightmap", "MainDepth"))
                         .withVertexBinding(0, DistantTerrainFormat.format(List.of("vPosition", "meta", "vColor")))
                         .withColorTargetState(new ColorTargetState(opaque ? Optional.empty() : Optional.of(BlendFunction.TRANSLUCENT), format, ColorTargetState.WRITE_ALL))
                         .withDepthStencilState(new DepthStencilState(CompareOp.GREATER_THAN, opaque))
@@ -146,7 +153,7 @@ final class PlainDistantDraw {
             }
             if (depthView == null) return false;
             int alignment = device.getDeviceInfo().limits().minUniformOffsetAlignment();
-            int stride = ((80 + alignment - 1) / alignment) * alignment;
+            int stride = ((144 + alignment - 1) / alignment) * alignment;
             int needed = Math.multiplyExact(Math.max(1, sections.size()), stride);
             if (uniforms == null || capacity < needed) {
                 if (uniforms != null) uniforms.close();
@@ -157,6 +164,7 @@ final class PlainDistantDraw {
             var camera = mc.gameRenderer.gameRenderState().levelRenderState.cameraRenderState;
             // Infinite reversed-Z projection: retain the vanilla FOV and near distance,
             // but do not clip cached LOD terrain at the vanilla far plane.
+            Matrix4f vanillaMvp = new Matrix4f(camera.projectionMatrix).mul(camera.viewRotationMatrix);
             Matrix4f projection = new Matrix4f(camera.projectionMatrix);
             float near = projection.m32() / (1.0f + projection.m22());
             projection.m22(0.0f).m32(near);
@@ -171,7 +179,7 @@ final class PlainDistantDraw {
                 for (int i = 0; i < sections.size(); i++) {
                     var section = sections.get(i);
                     data.position(i * stride);
-                    Std140Builder.intoBuffer(data).putMat4f(mvp).putVec4(
+                    Std140Builder.intoBuffer(data).putMat4f(mvp).putMat4f(vanillaMvp).putVec4(
                             (float)(section.x() - position.x), (float)(section.y() - position.y),
                             (float)(section.z() - position.z), 0.0f);
                 }
@@ -183,8 +191,10 @@ final class PlainDistantDraw {
                 GraphicsApi.setPipeline(pass, pipeline);
                 GraphicsApi.bindTexture(pass, "Lightmap", mc.gameRenderer.lightmap(),
                         RenderSystem.getSamplerCache().getClampToEdge(FilterMode.LINEAR));
+                GraphicsApi.bindTexture(pass, "MainDepth", target.getDepthTextureView(),
+                        RenderSystem.getSamplerCache().getClampToEdge(FilterMode.NEAREST));
                 for (int i = 0; i < sections.size(); i++) {
-                    pass.setUniform("PlainLod", uniforms.currentBuffer().slice((long)i * stride, 80));
+                    pass.setUniform("PlainLod", uniforms.currentBuffer().slice((long)i * stride, 144));
                     for (var piece : sections.get(i).pieces()) {
                         if (piece.vertices().isClosed() || piece.indices().isClosed() || piece.indexCount() == 0) continue;
                         boolean detailed = piece.detail() != null && !piece.detail().isClosed();
