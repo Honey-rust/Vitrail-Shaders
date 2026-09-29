@@ -41,10 +41,12 @@ final class PlainDistantDraw {
         uniform sampler2D Lightmap;
         out vec4 colour;
         out vec4 vanillaClip;
+        out float horizontalDistance;
         void main() {
             vec3 relative = vec3(vPosition) + offset.xyz;
             gl_Position = mvp * vec4(relative, 1.0);
             vanillaClip = vanillaMvp * vec4(relative, 1.0);
+            horizontalDistance = length(relative.xz);
             vec2 lightUv = (vec2((meta >> 4u) & 15u, meta & 15u) + 0.5) / 16.0;
             colour = vec4(vColor.rgb * textureLod(Lightmap, lightUv, 0.0).rgb, vColor.a);
             #ifdef TEXTURED
@@ -59,7 +61,9 @@ final class PlainDistantDraw {
         #version 460 core
         in vec4 colour;
         in vec4 vanillaClip;
+        in float horizontalDistance;
         uniform sampler2D MainDepth;
+        layout(std140) uniform PlainLod { mat4 mvp; mat4 vanillaMvp; vec4 offset; };
         #ifdef TEXTURED
         uniform sampler2D LodAtlas;
         in vec2 uv;
@@ -69,6 +73,9 @@ final class PlainDistantDraw {
         #endif
         layout(location=0) out vec4 fragColour;
         void main() {
+            // Vanilla owns the near field. Applying the same horizontal boundary to every LOD
+            // material removes duplicate torches, lanterns, leaves and opaque terrain uniformly.
+            if (horizontalDistance < offset.w) discard;
             float sceneDepth = texelFetch(MainDepth, ivec2(gl_FragCoord.xy), 0).r;
             float vanillaDepth = vanillaClip.z / vanillaClip.w;
             if (sceneDepth > 0.0 && sceneDepth >= vanillaDepth - 0.000001) discard;
@@ -170,6 +177,8 @@ final class PlainDistantDraw {
             projection.m22(0.0f).m32(near);
             Matrix4f mvp = projection.mul(camera.viewRotationMatrix);
             var position = mc.gameRenderer.mainCamera().position();
+            float vanillaDistance = Math.max(32.0F,
+                    (mc.options.getEffectiveRenderDistance() - 1) * 16.0F);
             if (!opaque) sections = sections.stream().sorted(java.util.Comparator.comparingDouble(
                     (DistantTerrainSection s) -> -((s.x() + 64.0 - position.x) * (s.x() + 64.0 - position.x)
                             + (s.y() + 64.0 - position.y) * (s.y() + 64.0 - position.y)
@@ -181,7 +190,7 @@ final class PlainDistantDraw {
                     data.position(i * stride);
                     Std140Builder.intoBuffer(data).putMat4f(mvp).putMat4f(vanillaMvp).putVec4(
                             (float)(section.x() - position.x), (float)(section.y() - position.y),
-                            (float)(section.z() - position.z), 0.0f);
+                            (float)(section.z() - position.z), vanillaDistance);
                 }
             }
             int pieces = 0;
