@@ -27,6 +27,7 @@ final class PlainDistantDraw {
         in uvec3 vPosition;
         in uint meta;
         in vec4 vColor;
+        in uint irisNormal;
         #ifdef TEXTURED
         in vec2 detailUv;
         in uint detailTile;
@@ -42,11 +43,13 @@ final class PlainDistantDraw {
         out vec4 colour;
         out vec4 vanillaClip;
         out float horizontalDistance;
+        flat out uint face;
         void main() {
             vec3 relative = vec3(vPosition) + offset.xyz;
             gl_Position = mvp * vec4(relative, 1.0);
             vanillaClip = vanillaMvp * vec4(relative, 1.0);
             horizontalDistance = length(relative.xz);
+            face = irisNormal;
             vec2 lightUv = (vec2((meta >> 4u) & 15u, meta & 15u) + 0.5) / 16.0;
             colour = vec4(vColor.rgb * textureLod(Lightmap, lightUv, 0.0).rgb, vColor.a);
             #ifdef TEXTURED
@@ -62,6 +65,7 @@ final class PlainDistantDraw {
         in vec4 colour;
         in vec4 vanillaClip;
         in float horizontalDistance;
+        flat in uint face;
         uniform sampler2D MainDepth;
         layout(std140) uniform PlainLod { mat4 mvp; mat4 vanillaMvp; vec4 offset; };
         #ifdef TEXTURED
@@ -73,9 +77,13 @@ final class PlainDistantDraw {
         #endif
         layout(location=0) out vec4 fragColour;
         void main() {
-            // Vanilla owns the near field. Applying the same horizontal boundary to every LOD
-            // material removes duplicate torches, lanterns, leaves and opaque terrain uniformly.
-            if (horizontalDistance < offset.w) discard;
+            float vanillaRange = abs(offset.w);
+            bool opaque = offset.w > 0.0;
+            // Vanilla owns the near field. Keep only upward opaque faces there as a hidden depth
+            // roof: vanilla solid/cutout terrain normally covers them, while under transparent
+            // water they prevent the near cut from exposing Voxy's cave walls. Side faces and all
+            // translucent faces remain excluded, so torches, lanterns and foliage cannot duplicate.
+            if (horizontalDistance < vanillaRange && (!opaque || face != 1u)) discard;
             float sceneDepth = texelFetch(MainDepth, ivec2(gl_FragCoord.xy), 0).r;
             float vanillaDepth = vanillaClip.z / vanillaClip.w;
             if (sceneDepth > 0.0 && sceneDepth >= vanillaDepth - 0.000001) discard;
@@ -133,7 +141,8 @@ final class PlainDistantDraw {
                         .withBindGroupLayout(detailed
                                 ? GraphicsApi.blockAndSamplers("PlainLod", "Lightmap", "MainDepth", "LodAtlas")
                                 : GraphicsApi.blockAndSamplers("PlainLod", "Lightmap", "MainDepth"))
-                        .withVertexBinding(0, DistantTerrainFormat.format(List.of("vPosition", "meta", "vColor")))
+                        .withVertexBinding(0, DistantTerrainFormat.format(
+                                List.of("vPosition", "meta", "vColor", "irisNormal")))
                         .withColorTargetState(new ColorTargetState(opaque ? Optional.empty() : Optional.of(BlendFunction.TRANSLUCENT), format, ColorTargetState.WRITE_ALL))
                         .withDepthStencilState(new DepthStencilState(CompareOp.GREATER_THAN, opaque))
                         .withPrimitiveTopology(PrimitiveTopology.TRIANGLES).withCull(true);
@@ -190,7 +199,7 @@ final class PlainDistantDraw {
                     data.position(i * stride);
                     Std140Builder.intoBuffer(data).putMat4f(mvp).putMat4f(vanillaMvp).putVec4(
                             (float)(section.x() - position.x), (float)(section.y() - position.y),
-                            (float)(section.z() - position.z), vanillaDistance);
+                            (float)(section.z() - position.z), opaque ? vanillaDistance : -vanillaDistance);
                 }
             }
             int pieces = 0;
