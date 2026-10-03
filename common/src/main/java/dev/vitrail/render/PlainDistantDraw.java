@@ -79,10 +79,14 @@ final class PlainDistantDraw {
             float vanillaRange = abs(offset.w);
             // Only partial/cutout/non-fluid models yield to vanilla. Complete terrain and fluid
             // surfaces remain continuous, so the near boundary cannot form a circular hole.
-            if (suppressNear != 0u && horizontalDistance < vanillaRange) discard;
+            if ((suppressNear != 0u || offset.w < 0.0) && horizontalDistance < vanillaRange) discard;
             float sceneDepth = texelFetch(MainDepth, ivec2(gl_FragCoord.xy), 0).r;
             float vanillaDepth = vanillaClip.z / vanillaClip.w;
-            if (sceneDepth > 0.0 && sceneDepth >= vanillaDepth - 0.000001) discard;
+            // Vanilla's finite projection is undefined past its far plane. Restrict this overlap
+            // test to the range where its depth is meaningful; the private infinite depth buffer
+            // orders all terrain beyond it.
+            if (horizontalDistance < vanillaRange && vanillaDepth > 0.0
+                    && sceneDepth > 0.0 && sceneDepth >= vanillaDepth - 0.000001) discard;
             fragColour = colour;
             #ifdef TEXTURED
             vec2 pixel = vec2(tile % 16u, tile / 16u) * 16.0 + clamp(fract(uv) * 16.0, 0.5, 15.5);
@@ -112,6 +116,9 @@ final class PlainDistantDraw {
     private static int width, height, capacity;
     private static MappableRingBuffer uniforms;
     private static boolean reported, failed;
+    private static Object plainWorld;
+    private static long plainWorldStartedNanos;
+    private static final long INITIAL_NEAR_GUARD_NANOS = 2_000_000_000L;
 
     static boolean draw(boolean opaque, List<DistantTerrainSection> sections) {
         // Water needs an opaque half first; provider terrain can use the world's real depth once
@@ -120,6 +127,11 @@ final class PlainDistantDraw {
         Minecraft mc = Minecraft.getInstance();
         GpuDevice device = RenderSystem.tryGetDevice();
         if (mc == null || mc.level == null || device == null) return false;
+        if (plainWorld != mc.level) {
+            plainWorld = mc.level;
+            plainWorldStartedNanos = System.nanoTime();
+        }
+        boolean initialNearGuard = System.nanoTime() - plainWorldStartedNanos < INITIAL_NEAR_GUARD_NANOS;
         RenderTarget target = mc.gameRenderer.mainRenderTarget();
         if (target == null || target.getColorTextureView() == null || mc.gameRenderer.lightmap() == null) return false;
         try {
@@ -195,7 +207,8 @@ final class PlainDistantDraw {
                     data.position(i * stride);
                     Std140Builder.intoBuffer(data).putMat4f(mvp).putMat4f(vanillaMvp).putVec4(
                             (float)(section.x() - position.x), (float)(section.y() - position.y),
-                            (float)(section.z() - position.z), opaque ? vanillaDistance : -vanillaDistance);
+                            (float)(section.z() - position.z), opaque && initialNearGuard
+                                    ? -vanillaDistance : vanillaDistance);
                 }
             }
             int pieces = 0;
@@ -249,6 +262,7 @@ final class PlainDistantDraw {
         uniforms = null; depthView = null; depth = null; pipeline = null;
         forgetPipelines();
         capacity = 0; reported = false; failed = false;
+        plainWorld = null; plainWorldStartedNanos = 0L;
     }
 
     private static void forgetPipelines() {
