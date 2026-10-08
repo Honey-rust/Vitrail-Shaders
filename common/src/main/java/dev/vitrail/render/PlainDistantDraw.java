@@ -19,7 +19,19 @@ import java.util.Optional;
 import java.util.OptionalDouble;
 
 /** Basic LOD rendering when no shader pack is active. Composited against vanilla world depth. */
-final class PlainDistantDraw {
+public final class PlainDistantDraw {
+    private static final Matrix4f terrainProjection = new Matrix4f();
+    private static final Matrix4f terrainView = new Matrix4f();
+    private static net.minecraft.world.phys.Vec3 terrainPosition;
+
+    /** Captured directly from the terrain invocation, before submitting the provider meshes. */
+    public static void captureTerrainView(org.joml.Matrix4fc projection, org.joml.Matrix4fc view,
+            double x, double y, double z) {
+        terrainProjection.set(projection);
+        terrainView.set(view);
+        terrainPosition = new net.minecraft.world.phys.Vec3(x, y, z);
+    }
+
     private static final Identifier SHADER = Identifier.fromNamespaceAndPath(Vitrail.MOD_ID, "plain_lod");
     private static final Identifier DETAIL_SHADER = Identifier.fromNamespaceAndPath(Vitrail.MOD_ID, "plain_lod_detail");
     private static final String VERTEX = """
@@ -40,14 +52,12 @@ final class PlainDistantDraw {
         layout(std140) uniform PlainLod { mat4 mvp; mat4 vanillaMvp; vec4 offset; };
         uniform sampler2D Lightmap;
         out vec4 colour;
-        out vec4 vanillaClip;
-        out float horizontalDistance;
+        out vec3 relativePosition;
         flat out uint suppressNear;
         void main() {
             vec3 relative = vec3(vPosition) + offset.xyz;
             gl_Position = mvp * vec4(relative, 1.0);
-            vanillaClip = vanillaMvp * vec4(relative, 1.0);
-            horizontalDistance = length(relative.xz);
+            relativePosition = relative;
             suppressNear = (meta >> 15u) & 1u;
             vec2 lightUv = (vec2((meta >> 4u) & 15u, meta & 15u) + 0.5) / 16.0;
             colour = vec4(vColor.rgb * textureLod(Lightmap, lightUv, 0.0).rgb, vColor.a);
@@ -62,10 +72,8 @@ final class PlainDistantDraw {
     private static final String FRAGMENT = """
         #version 460 core
         in vec4 colour;
-        in vec4 vanillaClip;
-        in float horizontalDistance;
+        in vec3 relativePosition;
         flat in uint suppressNear;
-        uniform sampler2D MainDepth;
         layout(std140) uniform PlainLod { mat4 mvp; mat4 vanillaMvp; vec4 offset; };
         #ifdef TEXTURED
         uniform sampler2D LodAtlas;
@@ -76,17 +84,18 @@ final class PlainDistantDraw {
         #endif
         layout(location=0) out vec4 fragColour;
         void main() {
-            float vanillaRange = abs(offset.w);
-            // Only partial/cutout/non-fluid models yield to vanilla. Complete terrain and fluid
-            // surfaces remain continuous, so the near boundary cannot form a circular hole.
-            if ((suppressNear != 0u || offset.w < 0.0) && horizontalDistance < vanillaRange) discard;
-            float sceneDepth = texelFetch(MainDepth, ivec2(gl_FragCoord.xy), 0).r;
-            float vanillaDepth = vanillaClip.z / vanillaClip.w;
-            // Vanilla's finite projection is undefined past its far plane. Restrict this overlap
-            // test to the range where its depth is meaningful; the private infinite depth buffer
-            // orders all terrain beyond it.
-            if (horizontalDistance < vanillaRange && vanillaDepth > 0.0
-                    && sceneDepth > 0.0 && sceneDepth >= vanillaDepth - 0.000001) discard;
+            // Match actual scene depth instead of cutting a square out of the world.
+            // The raster projection reaches infinity, while scene geometry uses finite reversed Z.
+            // Put fragments inside vanilla's far plane into that exact depth volume. Preserve a
+            // monotonic positive tail beyond it so distant surfaces still occlude each other.
+            vec4 sceneClip = vanillaMvp * vec4(relativePosition, 1.0);
+            float sceneDepth = sceneClip.z / sceneClip.w;
+            float infiniteDepth = gl_FragCoord.z;
+            gl_FragDepth = sceneDepth > 0.0
+                ? max(sceneDepth * 0.9999, 1e-12)
+                : max(infiniteDepth * 1e-7, 1e-12);
+            // Thin/non-cubic proxies cannot faithfully replace nearby torches and flowers.
+            if (suppressNear != 0u && length(relativePosition.xz) < abs(offset.w)) discard;
             fragColour = colour;
             #ifdef TEXTURED
             vec2 pixel = vec2(tile % 16u, tile / 16u) * 16.0 + clamp(fract(uv) * 16.0, 0.5, 15.5);
@@ -111,15 +120,9 @@ final class PlainDistantDraw {
     private static RenderPipeline pipeline;
     private static final RenderPipeline[] pipelines = new RenderPipeline[4];
     private static GpuFormat colourFormat;
-    private static GpuTexture depth;
-    private static GpuTextureView depthView;
     private static int width, height, capacity;
     private static MappableRingBuffer uniforms;
     private static boolean reported, failed;
-    private static Object plainWorld;
-    private static long plainWorldStartedNanos;
-    private static final long INITIAL_NEAR_GUARD_NANOS = 2_000_000_000L;
-
     static boolean draw(boolean opaque, List<DistantTerrainSection> sections) {
         // Water needs an opaque half first; provider terrain can use the world's real depth once
         // Sodium has completed its solid pass.
@@ -127,13 +130,9 @@ final class PlainDistantDraw {
         Minecraft mc = Minecraft.getInstance();
         GpuDevice device = RenderSystem.tryGetDevice();
         if (mc == null || mc.level == null || device == null) return false;
-        if (plainWorld != mc.level) {
-            plainWorld = mc.level;
-            plainWorldStartedNanos = System.nanoTime();
-        }
-        boolean initialNearGuard = System.nanoTime() - plainWorldStartedNanos < INITIAL_NEAR_GUARD_NANOS;
         RenderTarget target = mc.gameRenderer.mainRenderTarget();
-        if (target == null || target.getColorTextureView() == null || mc.gameRenderer.lightmap() == null) return false;
+        if (target == null || target.getColorTextureView() == null
+                || target.getDepthTextureView() == null || mc.gameRenderer.lightmap() == null) return false;
         try {
             GeometryHold.flush(() -> "plain distant terrain");
             GpuFormat format = target.getColorTexture().getFormat();
@@ -147,13 +146,15 @@ final class PlainDistantDraw {
                                 (opaque ? "plain_lod_opaque" : "plain_lod_translucent") + (detailed ? "_detail" : "")))
                         .withVertexShader(detailed ? DETAIL_SHADER : SHADER).withFragmentShader(detailed ? DETAIL_SHADER : SHADER)
                         .withBindGroupLayout(detailed
-                                ? GraphicsApi.blockAndSamplers("PlainLod", "Lightmap", "MainDepth", "LodAtlas")
-                                : GraphicsApi.blockAndSamplers("PlainLod", "Lightmap", "MainDepth"))
+                                ? GraphicsApi.blockAndSamplers("PlainLod", "Lightmap", "LodAtlas")
+                                : GraphicsApi.blockAndSamplers("PlainLod", "Lightmap"))
                         .withVertexBinding(0, DistantTerrainFormat.format(
                                 List.of("vPosition", "meta", "vColor")))
                         .withColorTargetState(new ColorTargetState(opaque ? Optional.empty() : Optional.of(BlendFunction.TRANSLUCENT), format, ColorTargetState.WRITE_ALL))
                         .withDepthStencilState(new DepthStencilState(CompareOp.GREATER_THAN, opaque))
-                        .withPrimitiveTopology(PrimitiveTopology.TRIANGLES).withCull(true);
+                        // Provider quads can arrive with either winding after axis/tile splitting.
+                        // Two-sided rasterisation prevents a whole compass direction disappearing.
+                        .withPrimitiveTopology(PrimitiveTopology.TRIANGLES).withCull(false);
                 if (detailed) builder.withVertexBinding(1, com.mojang.blaze3d.vertex.VertexFormat.builder(0)
                         .addAttribute("detailUv", 8, GpuFormat.RG32_FLOAT)
                         .addAttribute("detailTile", 4, GpuFormat.R32_UINT)
@@ -167,15 +168,8 @@ final class PlainDistantDraw {
                 }
             }
             }
-            if (depth == null || width != target.width || height != target.height) {
-                if (depthView != null) depthView.close();
-                if (depth != null) depth.close();
-                width = target.width; height = target.height;
-                depth = device.createTexture(() -> "Plain LOD depth", GpuTexture.USAGE_RENDER_ATTACHMENT,
-                        GpuFormat.D32_FLOAT, width, height, 1, 1);
-                depthView = device.createTextureView(depth);
-            }
-            if (depthView == null) return false;
+            width = target.width;
+            height = target.height;
             int alignment = device.getDeviceInfo().limits().minUniformOffsetAlignment();
             int stride = ((144 + alignment - 1) / alignment) * alignment;
             int needed = Math.multiplyExact(Math.max(1, sections.size()), stride);
@@ -186,16 +180,28 @@ final class PlainDistantDraw {
                         GpuBuffer.USAGE_UNIFORM | GpuBuffer.USAGE_MAP_WRITE, capacity);
             }
             var camera = mc.gameRenderer.gameRenderState().levelRenderState.cameraRenderState;
-            // Infinite reversed-Z projection: retain the vanilla FOV and near distance,
-            // but do not clip cached LOD terrain at the vanilla far plane.
-            Matrix4f vanillaMvp = new Matrix4f(camera.projectionMatrix).mul(camera.viewRotationMatrix);
-            Matrix4f projection = new Matrix4f(camera.projectionMatrix);
-            float near = projection.m32() / (1.0f + projection.m22());
-            projection.m22(0.0f).m32(near);
-            Matrix4f mvp = projection.mul(camera.viewRotationMatrix);
-            var position = mc.gameRenderer.mainCamera().position();
+            // This pass is called from Sodium's active terrain render. Read the matrix that
+            // Sodium/RenderSystem is using at that instant instead of the extracted frame-state
+            // copy, which can still describe the preceding direction during a fast turn.
+            Matrix4f view = terrainPosition != null ? new Matrix4f(terrainView)
+                    : RenderSystem.getModelViewMatrixCopy();
+            Matrix4f original = terrainPosition != null ? new Matrix4f(terrainProjection)
+                    : new Matrix4f(CapturedProjection.rendered(camera.projectionMatrix));
+            Matrix4f vanillaMvp = new Matrix4f(original).mul(view);
+            // Remove the finite far term from the complete depth row (including camera effects).
+            float a = camera.projectionMatrix.m22();
+            float b = camera.projectionMatrix.m32();
+            float near = b / (1.0f + a);
+            float scale = near / b;
+            Matrix4f projection = new Matrix4f(original);
+            projection.m02(scale * (original.m02() + a * original.m03()));
+            projection.m12(scale * (original.m12() + a * original.m13()));
+            projection.m22(scale * (original.m22() + a * original.m23()));
+            projection.m32(scale * (original.m32() + a * original.m33()));
+            Matrix4f mvp = projection.mul(view);
+            var position = terrainPosition != null ? terrainPosition : mc.gameRenderer.mainCamera().position();
             float vanillaDistance = Math.max(32.0F,
-                    (mc.options.getEffectiveRenderDistance() - 1) * 16.0F);
+                    mc.options.getEffectiveRenderDistance() * 16.0F);
             if (!opaque) sections = sections.stream().sorted(java.util.Comparator.comparingDouble(
                     (DistantTerrainSection s) -> -((s.x() + 64.0 - position.x) * (s.x() + 64.0 - position.x)
                             + (s.y() + 64.0 - position.y) * (s.y() + 64.0 - position.y)
@@ -207,19 +213,16 @@ final class PlainDistantDraw {
                     data.position(i * stride);
                     Std140Builder.intoBuffer(data).putMat4f(mvp).putMat4f(vanillaMvp).putVec4(
                             (float)(section.x() - position.x), (float)(section.y() - position.y),
-                            (float)(section.z() - position.z), opaque && initialNearGuard
-                                    ? -vanillaDistance : vanillaDistance);
+                            (float)(section.z() - position.z), vanillaDistance);
                 }
             }
             int pieces = 0;
             try (RenderPass pass = device.createCommandEncoder().createRenderPass(() -> "Plain Voxy LOD",
-                    target.getColorTextureView(), Optional.empty(), depthView,
-                    opaque ? OptionalDouble.of(0.0) : OptionalDouble.empty())) {
+                    target.getColorTextureView(), Optional.empty(), target.getDepthTextureView(),
+                    OptionalDouble.empty())) {
                 GraphicsApi.setPipeline(pass, pipeline);
                 GraphicsApi.bindTexture(pass, "Lightmap", mc.gameRenderer.lightmap(),
                         RenderSystem.getSamplerCache().getClampToEdge(FilterMode.LINEAR));
-                GraphicsApi.bindTexture(pass, "MainDepth", target.getDepthTextureView(),
-                        RenderSystem.getSamplerCache().getClampToEdge(FilterMode.NEAREST));
                 for (int i = 0; i < sections.size(); i++) {
                     pass.setUniform("PlainLod", uniforms.currentBuffer().slice((long)i * stride, 144));
                     for (var piece : sections.get(i).pieces()) {
@@ -257,12 +260,9 @@ final class PlainDistantDraw {
 
     static void close() {
         if (uniforms != null) uniforms.close();
-        if (depthView != null) depthView.close();
-        if (depth != null) depth.close();
-        uniforms = null; depthView = null; depth = null; pipeline = null;
+        uniforms = null; pipeline = null;
         forgetPipelines();
-        capacity = 0; reported = false; failed = false;
-        plainWorld = null; plainWorldStartedNanos = 0L;
+        capacity = 0; reported = false; failed = false; terrainPosition = null;
     }
 
     private static void forgetPipelines() {
@@ -273,4 +273,5 @@ final class PlainDistantDraw {
         }
     }
 }
+
 
