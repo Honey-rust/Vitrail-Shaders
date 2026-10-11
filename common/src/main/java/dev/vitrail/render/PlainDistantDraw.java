@@ -56,6 +56,9 @@ public final class PlainDistantDraw {
         flat out uint suppressNear;
         void main() {
             vec3 relative = vec3(vPosition) + offset.xyz;
+            #ifdef TEXTURED
+            relative += vec3(float((detailTile >> 14u) & 63u), float((detailTile >> 20u) & 63u), float((detailTile >> 26u) & 63u)) / 64.0;
+            #endif
             gl_Position = mvp * vec4(relative, 1.0);
             relativePosition = relative;
             suppressNear = (meta >> 15u) & 1u;
@@ -63,7 +66,7 @@ public final class PlainDistantDraw {
             colour = vec4(vColor.rgb * textureLod(Lightmap, lightUv, 0.0).rgb, vColor.a);
             #ifdef TEXTURED
             uv = detailUv;
-            tile = detailTile;
+            tile = detailTile & 16383u;
             average = detailAverage;
             distanceToCamera = length(vec3(vPosition) + offset.xyz);
             #endif
@@ -100,7 +103,9 @@ public final class PlainDistantDraw {
             #ifdef TEXTURED
             vec2 pixel = vec2(tile % 16u, tile / 16u) * 16.0 + clamp(fract(uv) * 16.0, 0.5, 15.5);
             vec4 sampleColour = textureLod(LodAtlas, pixel / vec2(256.0, 12288.0), 0.0);
-            float detail = 1.0 - smoothstep(96.0, 256.0, distanceToCamera);
+            // Choose texture detail by projected texel footprint, so zoom and FOV remain consistent.
+            float footprint = max(length(dFdx(uv) * 16.0), length(dFdy(uv) * 16.0));
+            float detail = 1.0 - smoothstep(0.75, 3.0, footprint);
             // Preserve the cutout silhouette while it still covers enough pixels to read.  At
             // coarse distance the texel holes in leaves and other cutouts become white noise;
             // Voxy's face average is the stable representation for that footprint.
@@ -120,9 +125,11 @@ public final class PlainDistantDraw {
     private static RenderPipeline pipeline;
     private static final RenderPipeline[] pipelines = new RenderPipeline[4];
     private static GpuFormat colourFormat;
-    private static int width, height, capacity;
-    private static MappableRingBuffer uniforms;
+    private static int width, height;
+    private static final int[] capacities = new int[2];
+    private static final MappableRingBuffer[] passUniforms = new MappableRingBuffer[2];
     private static boolean reported, failed;
+    private static long nextDrawReport;
     static boolean draw(boolean opaque, List<DistantTerrainSection> sections) {
         // Water needs an opaque half first; provider terrain can use the world's real depth once
         // Sodium has completed its solid pass.
@@ -137,7 +144,8 @@ public final class PlainDistantDraw {
             GeometryHold.flush(() -> "plain distant terrain");
             GpuFormat format = target.getColorTexture().getFormat();
             if (colourFormat != format) forgetPipelines();
-            for (boolean detailed : new boolean[]{false, true}) {
+            for (int variant = 0; variant < 2; variant++) {
+            boolean detailed = variant != 0;
             int pipelineIndex = (opaque ? 0 : 1) + (detailed ? 2 : 0);
             pipeline = pipelines[pipelineIndex];
             if (pipeline == null) {
@@ -173,11 +181,17 @@ public final class PlainDistantDraw {
             int alignment = device.getDeviceInfo().limits().minUniformOffsetAlignment();
             int stride = ((144 + alignment - 1) / alignment) * alignment;
             int needed = Math.multiplyExact(Math.max(1, sections.size()), stride);
-            if (uniforms == null || capacity < needed) {
+            int passIndex = opaque ? 0 : 1;
+            MappableRingBuffer uniforms = passUniforms[passIndex];
+            if (uniforms == null || capacities[passIndex] < needed) {
                 if (uniforms != null) uniforms.close();
-                capacity = needed;
+                // Grow geometrically so moving across section boundaries does not keep
+                // retiring GPU uniform buffers for small increases in the visible set.
+                int capacity = Math.multiplyExact(Integer.highestOneBit(needed - 1), 2);
                 uniforms = new MappableRingBuffer(() -> "Plain LOD transforms",
                         GpuBuffer.USAGE_UNIFORM | GpuBuffer.USAGE_MAP_WRITE, capacity);
+                passUniforms[passIndex] = uniforms;
+                capacities[passIndex] = capacity;
             }
             var camera = mc.gameRenderer.gameRenderState().levelRenderState.cameraRenderState;
             // This pass is called from Sodium's active terrain render. Read the matrix that
@@ -216,24 +230,43 @@ public final class PlainDistantDraw {
                             (float)(section.z() - position.z), vanillaDistance);
                 }
             }
-            int pieces = 0;
+            int pieces = 0, culled = 0;
             try (RenderPass pass = device.createCommandEncoder().createRenderPass(() -> "Plain Voxy LOD",
                     target.getColorTextureView(), Optional.empty(), target.getDepthTextureView(),
                     OptionalDouble.empty())) {
                 GraphicsApi.setPipeline(pass, pipeline);
+                RenderPipeline activePipeline = pipeline;
+                GpuTextureView activeAtlas = null;
                 GraphicsApi.bindTexture(pass, "Lightmap", mc.gameRenderer.lightmap(),
                         RenderSystem.getSamplerCache().getClampToEdge(FilterMode.LINEAR));
                 for (int i = 0; i < sections.size(); i++) {
-                    pass.setUniform("PlainLod", uniforms.currentBuffer().slice((long)i * stride, 144));
-                    for (var piece : sections.get(i).pieces()) {
+                    var section = sections.get(i);
+                    float offsetX = (float)(section.x() - position.x);
+                    float offsetY = (float)(section.y() - position.y);
+                    float offsetZ = (float)(section.z() - position.z);
+                    boolean sectionBound = false;
+                    for (var piece : section.pieces()) {
                         if (piece.vertices().isClosed() || piece.indices().isClosed() || piece.indexCount() == 0) continue;
+                        var bounds = piece.bounds();
+                        if (bounds != null && !visible(mvp, bounds, offsetX, offsetY, offsetZ)) { culled++; continue; }
+                        if (!sectionBound) {
+                            pass.setUniform("PlainLod", uniforms.currentBuffer().slice((long)i * stride, 144));
+                            sectionBound = true;
+                        }
                         boolean detailed = piece.detail() != null && !piece.detail().isClosed();
-                        GraphicsApi.setPipeline(pass,
-                                pipelines[(opaque ? 0 : 1) + (detailed ? 2 : 0)]);
+                        RenderPipeline nextPipeline = pipelines[(opaque ? 0 : 1) + (detailed ? 2 : 0)];
+                        if (activePipeline != nextPipeline) {
+                            GraphicsApi.setPipeline(pass, nextPipeline);
+                            activePipeline = nextPipeline;
+                            activeAtlas = null;
+                        }
                         if (detailed) {
                             pass.setVertexBuffer(1, piece.detail().slice());
-                            GraphicsApi.bindTexture(pass, "LodAtlas", piece.atlas(),
-                                    RenderSystem.getSamplerCache().getClampToEdge(FilterMode.NEAREST));
+                            if (activeAtlas != piece.atlas()) {
+                                GraphicsApi.bindTexture(pass, "LodAtlas", piece.atlas(),
+                                        RenderSystem.getSamplerCache().getClampToEdge(FilterMode.NEAREST));
+                                activeAtlas = piece.atlas();
+                            }
                         }
                         pass.setVertexBuffer(0, piece.vertices().slice());
                         pass.setIndexBuffer(piece.indices(), IndexType.INT);
@@ -248,6 +281,12 @@ public final class PlainDistantDraw {
                 reported = true;
                 Vitrail.logger().info("Plain Voxy LOD: drew {} sections / {} meshes without a shader pack", sections.size(), pieces);
             }
+            long now = System.nanoTime();
+            if (opaque && now >= nextDrawReport) {
+                nextDrawReport = now + 5_000_000_000L;
+                Vitrail.logger().info("Plain LOD visibility: {} opaque meshes submitted, {} outside view retained in cache",
+                        pieces, culled);
+            }
             return pieces > 0;
         } catch (GpuDeviceLossException e) {
             throw e;
@@ -258,11 +297,32 @@ public final class PlainDistantDraw {
         }
     }
 
+    /** Infinite reversed-Z volume: omit the far plane and keep conservative AABB tests. */
+    private static boolean visible(Matrix4f m, DistantTerrainSection.Bounds b, float x, float y, float z) {
+        float minX = b.minX() + x, minY = b.minY() + y, minZ = b.minZ() + z;
+        float maxX = b.maxX() + x, maxY = b.maxY() + y, maxZ = b.maxZ() + z;
+        return inside(m.m03()+m.m00(),m.m13()+m.m10(),m.m23()+m.m20(),m.m33()+m.m30(),minX,minY,minZ,maxX,maxY,maxZ)
+            && inside(m.m03()-m.m00(),m.m13()-m.m10(),m.m23()-m.m20(),m.m33()-m.m30(),minX,minY,minZ,maxX,maxY,maxZ)
+            && inside(m.m03()+m.m01(),m.m13()+m.m11(),m.m23()+m.m21(),m.m33()+m.m31(),minX,minY,minZ,maxX,maxY,maxZ)
+            && inside(m.m03()-m.m01(),m.m13()-m.m11(),m.m23()-m.m21(),m.m33()-m.m31(),minX,minY,minZ,maxX,maxY,maxZ)
+            && inside(m.m03()-m.m02(),m.m13()-m.m12(),m.m23()-m.m22(),m.m33()-m.m32(),minX,minY,minZ,maxX,maxY,maxZ);
+    }
+
+    private static boolean inside(float a,float b,float c,float d,
+            float minX,float minY,float minZ,float maxX,float maxY,float maxZ) {
+        float support = a*(a>=0?maxX:minX)+b*(b>=0?maxY:minY)+c*(c>=0?maxZ:minZ)+d;
+        return !Float.isFinite(support) || support >= -0.01f;
+    }
+
     static void close() {
-        if (uniforms != null) uniforms.close();
-        uniforms = null; pipeline = null;
+        for (int i = 0; i < passUniforms.length; i++) {
+            if (passUniforms[i] != null) passUniforms[i].close();
+            passUniforms[i] = null;
+            capacities[i] = 0;
+        }
+        pipeline = null;
         forgetPipelines();
-        capacity = 0; reported = false; failed = false; terrainPosition = null;
+        reported = false; failed = false; terrainPosition = null; nextDrawReport = 0;
     }
 
     private static void forgetPipelines() {

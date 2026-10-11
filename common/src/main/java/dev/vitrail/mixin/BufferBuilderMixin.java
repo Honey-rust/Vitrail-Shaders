@@ -1,5 +1,6 @@
 package dev.vitrail.mixin;
 
+import com.llamalad7.mixinextras.injector.ModifyReturnValue;
 import dev.vitrail.glsl.EntityVertex;
 import dev.vitrail.glsl.MovingBlockVertex;
 import dev.vitrail.mixin.access.ByteBufferBuilderAccessor;
@@ -194,10 +195,10 @@ public abstract class BufferBuilderMixin {
 	 * and the axis is not a nicety: a tangent of nought normalises to a NaN that reaches the colour.
 	 * A moving block's {@code at_midBlock} takes nought the same way until its polygon is whole.
 	 */
-	@Inject(method = "beginVertex", at = @At("RETURN"), require = 1)
-	private void vitrail$writeVertex(CallbackInfoReturnable<Long> callback) {
+	@ModifyReturnValue(method = "beginVertex", at = @At("RETURN"), require = 1)
+	private long vitrail$writeVertex(long pointer) {
 		if (this.vitrail$midTexCoord < 0) {
-			return;
+			return pointer;
 		}
 
 		// Before anything of this vertex is recorded, and it has to be here: the vertex that just
@@ -205,7 +206,6 @@ public abstract class BufferBuilderMixin {
 		// written.
 		vitrail$fill();
 
-		long pointer = callback.getReturnValueJ();
 		if (this.vitrail$identifiers >= 0) {
 			long identifiers = pointer + this.vitrail$identifiers;
 			MemoryUtil.memPutShort(identifiers, (short) EntityIdentifiers.entity());
@@ -227,6 +227,7 @@ public abstract class BufferBuilderMixin {
 			corner[this.vitrail$written++] =
 					pointer - ((ByteBufferBuilderAccessor) this.buffer).vitrail$pointer();
 		}
+		return pointer;
 	}
 
 	/**

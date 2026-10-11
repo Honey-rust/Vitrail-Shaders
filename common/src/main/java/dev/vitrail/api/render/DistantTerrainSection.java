@@ -24,8 +24,15 @@ public record DistantTerrainSection(int x, int y, int z, List<Piece> pieces) {
      * Optional detail vertices have stride 16: float UV at 0, uint tile at 8, RGBA8 average at 12.
      * The atlas holds 16x16 texel tiles in 16 columns and 768 rows. Providers own both resources.
      */
+    /** Conservative local-space geometry bounds; null means the provider does not supply them. */
+    public record Bounds(float minX, float minY, float minZ, float maxX, float maxY, float maxZ) {}
+
     public record Piece(GpuBuffer vertices, GpuBuffer indices, int indexCount,
-                        GpuBuffer detail, com.mojang.blaze3d.textures.GpuTextureView atlas) {
+                        GpuBuffer detail, com.mojang.blaze3d.textures.GpuTextureView atlas, Bounds bounds) {
+        public Piece(GpuBuffer vertices, GpuBuffer indices, int indexCount,
+                GpuBuffer detail, com.mojang.blaze3d.textures.GpuTextureView atlas) {
+            this(vertices, indices, indexCount, detail, atlas, null);
+        }
         public Piece(GpuBuffer vertices, GpuBuffer indices, int indexCount) {
             this(vertices, indices, indexCount, null, null);
         }

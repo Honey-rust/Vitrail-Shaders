@@ -7,6 +7,8 @@
 		"defaultRequire": 1
 	},
 	"client": [
+		"sodium.SerializerLookupMixin",
+		"DreamDisplaysShaderLookupMixin",
 		"access.BiomeClimateAccessor",
 		"BiomeMixin",
 		"BiomesMixin",

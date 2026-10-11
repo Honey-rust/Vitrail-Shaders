@@ -111,7 +111,7 @@ final class DistantProgram extends FamilyProgram {
 	 */
 	static DistantProgram of(PackProgram.Loaded loaded, DistantDraw.Element element,
 			List<String> carried, PackValues values, int load, List<ChainPlan.Attachment> writes,
-			TargetPlan chainTargets, ColorTargets targets, boolean chainRuns) {
+			TargetPlan chainTargets, ColorTargets targets, boolean chainRuns, boolean detailed) {
 		// Bound again against the chain's own plan, for the reason every other family is: what the
 		// load bound them against is a plan without the user's pass filter. The step is the half's,
 		// the two standing on opposite sides of the deferred stage.
@@ -159,7 +159,9 @@ final class DistantProgram extends FamilyProgram {
 				// (shadows/ShadowRenderer.java:501): what matters is which surface is nearest the
 				// light and not which way it faces, and a hill drawn on one side only leaks light
 				// through its back.
-				!element.afterDeferred() && !element.shadow(),
+                // External voxel providers supply full volumetric surfaces, unlike DH's
+                // heightfield. Match the plain path's two-sided drawing for those meshes.
+                !DistantTerrainRenderer.hasProviders() && !element.afterDeferred() && !element.shadow(),
 				element.shadow() ? SHADOW_DEPTH : DEPTH, element.stage(), null,
 				// The one family with a value that belongs to the section rather than to the pass.
 				DistantVertex.SECTION_BLOCK,
@@ -171,7 +173,7 @@ final class DistantProgram extends FamilyProgram {
 				// (compat/dh/LodRendererEvents.java:304-307). The three dhProjection names answer
 				// DH's volume for every pass alike, as Iris serves them.
 				!element.shadow()),
-				bound, values, load, format, writes, targets, chainRuns));
+				bound, values, load, format, writes, targets, chainRuns, detailed));
 	}
 
 	/**

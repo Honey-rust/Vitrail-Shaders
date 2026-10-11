@@ -532,7 +532,13 @@ final class GeometryProgram {
 	GeometryProgram(Pass pass, PackProgram.Loaded loaded, PackValues values, int load,
 			VertexFormat format, List<ChainPlan.Attachment> writes, ColorTargets targets,
 			boolean chainRuns) {
-		this.pass = pass;
+        this(pass, loaded, values, load, format, writes, targets, chainRuns, false);
+    }
+
+    GeometryProgram(Pass pass, PackProgram.Loaded loaded, PackValues values, int load,
+            VertexFormat format, List<ChainPlan.Attachment> writes, ColorTargets targets,
+            boolean chainRuns, boolean distantDetail) {
+        this.pass = pass;
 		this.path = loaded.path();
 		this.gameTransforms = loaded.readsGameTransforms();
 		this.blockLabel = () -> "Vitrail " + pass.family() + " OfGlobals";
@@ -719,7 +725,7 @@ final class GeometryProgram {
 		// half does not. The device caches a shader module under its identifier, so one name for two
 		// texts would hand the second whatever the first compiled to, and the picture would be a
 		// picture with the discard silently gone.
-		String stem = "pack/" + load + "/" + pass.name() + "/" + this.path;
+		String stem = "pack/" + load + "/" + pass.name() + "/" + this.path + (distantDetail ? "/voxy_detail" : "");
 		Identifier vertexId = Identifier.fromNamespaceAndPath(pass.namespace(), stem + "/vertex");
 		Identifier fragmentId = Identifier.fromNamespaceAndPath(pass.namespace(), stem + "/fragment");
 
@@ -734,6 +740,7 @@ final class GeometryProgram {
 		}
 
 		this.samplers.forEach(name -> GraphicsApi.withSampler(bindings, name));
+        if (distantDetail) GraphicsApi.withSampler(bindings, DistantDetail.SAMPLER);
 		this.storage.forEach(name -> bindings.withUniform(name, UniformType.UNIFORM_BUFFER));
 
 		// Everything but the shaders, the bind group, the attachments and the two lines below is
@@ -772,6 +779,10 @@ final class GeometryProgram {
 		// nought elements would name a buffer the pass never sets.
 		if (format != null) {
 			builder.withVertexBinding(0, format);
+            if (distantDetail) builder.withVertexBinding(1, VertexFormat.builder(0)
+                    .addAttribute("detailUv", 8, GpuFormat.RG32_FLOAT)
+                    .addAttribute("detailTile", 4, GpuFormat.R32_UINT)
+                    .addAttribute("detailAverage", 4, GpuFormat.RGBA8_UNORM).build());
 		}
 
 		// Left unset where the family answers null, which is not the same as setting the default one:
@@ -830,12 +841,16 @@ final class GeometryProgram {
 			this.broken = true;
 		}
 
-		this.source = GraphicsApi.source((id, type) -> {
+		String detailColour = distantDetail && fragment != null ? DistantDetail.colour(vertex, fragment) : null;
+        if (distantDetail && detailColour == null) throw new IllegalArgumentException("No direct LOD colour varying: " + this.path);
+        final String drawVertex = distantDetail ? DistantDetail.vertex(vertex, detailColour) : vertex;
+        final String drawFragment = distantDetail ? DistantDetail.fragment(fragment, detailColour) : fragment;
+        this.source = GraphicsApi.source((id, type) -> {
 			if (type == ShaderType.FRAGMENT) {
-				return fragmentId.equals(id) ? fragment : null;
+				return fragmentId.equals(id) ? drawFragment : null;
 			}
 
-			return vertexId.equals(id) ? vertex : null;
+			return vertexId.equals(id) ? drawVertex : null;
 		});
 
 		// A storage block this engine has no bufferObject for is the one refusal that does not

@@ -44,6 +44,7 @@ import net.minecraft.util.Mth;
 import net.minecraft.world.phys.Vec3;
 
 import org.joml.Vector2f;
+import org.joml.Matrix4f;
 
 import java.io.IOException;
 import java.nio.ByteBuffer;
@@ -688,6 +689,8 @@ public final class DistantDraw extends FamilyDraw {
 		// six fixed function names already answers, and the projection handed to a pass is the
 		// frame's camera one wherever a pack asks for it by its gbuffers name.
 		RenderPipeline pipeline = program.prepare(device, null);
+        DistantProgram detailProgram = this.programs.get(element.element() + "/detail");
+        RenderPipeline detailPipeline = detailProgram == null ? null : detailProgram.prepare(device, null);
 		if (pipeline == null) {
 			refuseShadow(element, "prepare", "its program could not be prepared. There are two "
 					+ "reasons for that and one of them says so on a line of its own above, the "
@@ -721,6 +724,8 @@ public final class DistantDraw extends FamilyDraw {
 		try (RenderPass pass = GeometryHold.open(device.createCommandEncoder(), descriptor)) {
 			GraphicsApi.setPipeline(pass, pipeline);
 			program.bind(pass);
+            RenderPipeline activePipeline = pipeline;
+            GpuTextureView activeAtlas = null;
 
 			for (int index = 0; index < sections.size(); index++) {
 				pass.setUniform(DistantVertex.SECTION_BLOCK,
@@ -736,7 +741,24 @@ public final class DistantDraw extends FamilyDraw {
 						continue;
 					}
 
-					pass.setIndexBuffer(piece.indices(), IndexType.INT);
+					boolean detailed = detailPipeline != null && piece.detail() != null
+                            && !piece.detail().isClosed() && piece.atlas() != null;
+                    RenderPipeline nextPipeline = detailed ? detailPipeline : pipeline;
+                    if (activePipeline != nextPipeline) {
+                        GraphicsApi.setPipeline(pass, nextPipeline);
+                        (detailed ? detailProgram : program).bind(pass);
+                        activePipeline = nextPipeline;
+                        activeAtlas = null;
+                    }
+                    if (detailed) {
+                        pass.setVertexBuffer(1, piece.detail().slice());
+                        if (activeAtlas != piece.atlas()) {
+                            GraphicsApi.bindTexture(pass, DistantDetail.SAMPLER, piece.atlas(),
+                                    RenderSystem.getSamplerCache().getClampToEdge(FilterMode.NEAREST));
+                            activeAtlas = piece.atlas();
+                        }
+                    }
+                    pass.setIndexBuffer(piece.indices(), IndexType.INT);
 					pass.setVertexBuffer(0, piece.vertices().slice());
 					pass.drawIndexed(piece.indexCount(), 1, 0, 0, 0);
 				}
@@ -797,6 +819,9 @@ public final class DistantDraw extends FamilyDraw {
 		}
 
 		RenderPipeline pipeline = program.prepare(device, this.values.world().drawnDistantProjection());
+        DistantProgram detailProgram = this.programs.get(element.element() + "/detail");
+        RenderPipeline detailPipeline = detailProgram == null ? null
+                : detailProgram.prepare(device, this.values.world().drawnDistantProjection());
 		if (pipeline == null) {
 			return refuse(element, "prepare:" + element.element(), "the " + element.element()
 					+ " program refused to prepare, which it says on its own line above. That is "
@@ -871,7 +896,10 @@ public final class DistantDraw extends FamilyDraw {
 		// else this engine places is placed against the game's, and a far terrain placed against a
 		// second reading of the same position would stand a fraction of a block away from the near
 		// terrain it meets.
-		int base = CORNERS.write(device, sections, minecraft.gameRenderer.mainCamera().position());
+        Vec3 lodCamera = minecraft.gameRenderer.mainCamera().position();
+        int base = CORNERS.write(device, sections, lodCamera);
+        Matrix4f lodView = element.shadow() ? null : new Matrix4f(
+                this.values.world().drawnDistantProjection()).mul(this.values.world().gbufferModelView());
 		if (base < 0) {
 			return refuse(element, "sections", "the far terrain grew wider than the block holding its "
 					+ "section corners between the two halves of one frame, and the wider block cannot "
@@ -884,11 +912,21 @@ public final class DistantDraw extends FamilyDraw {
 				: GeometryHold.open(encoder, descriptor)) {
 			GraphicsApi.setPipeline(pass, pipeline);
 			program.bind(pass);
+            RenderPipeline activePipeline = pipeline;
+            GpuTextureView activeAtlas = null;
 
 			for (int index = 0; index < sections.size(); index++) {
-				pass.setUniform(DistantVertex.SECTION_BLOCK, CORNERS.slot(device, base + index));
+                DistantTerrainSection section = sections.get(index);
+                float offsetX = (float)(section.x() - lodCamera.x);
+                float offsetY = (float)(section.y() - lodCamera.y);
+                float offsetZ = (float)(section.z() - lodCamera.z);
+                boolean sectionBound = false;
 
-				for (DistantTerrainSection.Piece piece : sections.get(index).pieces()) {
+                for (DistantTerrainSection.Piece piece : section.pieces()) {
+                    if (lodView != null && piece.bounds() != null && !withinHorizontalView(lodView,
+                            piece.bounds(), offsetX, offsetY, offsetZ)) {
+                        continue;
+                    }
 					// The shadow half's guard, asked here for what it says as much as for what
 					// it spares. The capture looks at the vertex buffer alone and nothing has
 					// ever looked at the index one, so a piece whose index buffer DH closed
@@ -907,7 +945,28 @@ public final class DistantDraw extends FamilyDraw {
 						continue;
 					}
 
-					pass.setIndexBuffer(piece.indices(), IndexType.INT);
+                    if (!sectionBound) {
+                        pass.setUniform(DistantVertex.SECTION_BLOCK, CORNERS.slot(device, base + index));
+                        sectionBound = true;
+                    }
+					boolean detailed = detailPipeline != null && piece.detail() != null
+                            && !piece.detail().isClosed() && piece.atlas() != null;
+                    RenderPipeline nextPipeline = detailed ? detailPipeline : pipeline;
+                    if (activePipeline != nextPipeline) {
+                        GraphicsApi.setPipeline(pass, nextPipeline);
+                        (detailed ? detailProgram : program).bind(pass);
+                        activePipeline = nextPipeline;
+                        activeAtlas = null;
+                    }
+                    if (detailed) {
+                        pass.setVertexBuffer(1, piece.detail().slice());
+                        if (activeAtlas != piece.atlas()) {
+                            GraphicsApi.bindTexture(pass, DistantDetail.SAMPLER, piece.atlas(),
+                                    RenderSystem.getSamplerCache().getClampToEdge(FilterMode.NEAREST));
+                            activeAtlas = piece.atlas();
+                        }
+                    }
+                    pass.setIndexBuffer(piece.indices(), IndexType.INT);
 					pass.setVertexBuffer(0, piece.vertices().slice());
 					pass.drawIndexed(piece.indexCount(), 1, 0, 0, 0);
 				}
@@ -933,7 +992,24 @@ public final class DistantDraw extends FamilyDraw {
 	 * @param descriptor the pack's own descriptor, or null where the pass is built here instead from
 	 *                   the game's colour view, which is the image's own size by construction
 	 */
-	private boolean coversDepth(RenderPassDescriptor descriptor) {
+    /** Only reject left/right planes; keep vertical/far coverage for shader-deformed terrain. */
+    private static boolean withinHorizontalView(Matrix4f m, DistantTerrainSection.Bounds b,
+            float x, float y, float z) {
+        float minX=b.minX()+x-64, minY=b.minY()+y-64, minZ=b.minZ()+z-64;
+        float maxX=b.maxX()+x+64, maxY=b.maxY()+y+64, maxZ=b.maxZ()+z+64;
+        return supportsPlane(m.m03()+m.m00(),m.m13()+m.m10(),m.m23()+m.m20(),m.m33()+m.m30(),
+                minX,minY,minZ,maxX,maxY,maxZ)
+            && supportsPlane(m.m03()-m.m00(),m.m13()-m.m10(),m.m23()-m.m20(),m.m33()-m.m30(),
+                minX,minY,minZ,maxX,maxY,maxZ);
+    }
+
+    private static boolean supportsPlane(float a,float b,float c,float d,
+            float minX,float minY,float minZ,float maxX,float maxY,float maxZ) {
+        float support=a*(a>=0?maxX:minX)+b*(b>=0?maxY:minY)+c*(c>=0?maxZ:minZ)+d;
+        return !Float.isFinite(support) || support>=-0.01f;
+    }
+
+    private boolean coversDepth(RenderPassDescriptor descriptor) {
 		if (descriptor == null) {
 			return true;
 		}
@@ -1147,7 +1223,18 @@ public final class DistantDraw extends FamilyDraw {
 				if (writes != null) {
 					this.programs.put(element.element(), DistantProgram.of(one, element, this.carried,
 							this.values, this.load, writes, this.chainTargets, this.targets,
-							this.chainRuns));
+							this.chainRuns, false));
+                    // Separate optional layout: native DH pieces still use binding zero only.
+                    if (dev.vitrail.api.render.DistantTerrainRenderer.hasProviders()
+                            && !one.program().stages().containsKey(dev.vitrail.pack.model.ProgramStage.GEOMETRY)) {
+                        try {
+                            this.programs.put(element.element() + "/detail", DistantProgram.of(one, element,
+                                    this.carried, this.values, this.load, writes, this.chainTargets,
+                                    this.targets, this.chainRuns, true));
+                        } catch (IllegalArgumentException unsupported) {
+                            Vitrail.logger().warn("LOD texture detail unavailable for {}: {}", one.path(), unsupported.getMessage());
+                        }
+                    }
 				}
 			}
 
