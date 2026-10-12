@@ -54,6 +54,7 @@ public final class PlainDistantDraw {
         out vec4 colour;
         out vec3 relativePosition;
         flat out uint suppressNear;
+        flat out uint solidLeaves;
         void main() {
             vec3 relative = vec3(vPosition) + offset.xyz;
             #ifdef TEXTURED
@@ -62,6 +63,7 @@ public final class PlainDistantDraw {
             gl_Position = mvp * vec4(relative, 1.0);
             relativePosition = relative;
             suppressNear = (meta >> 15u) & 1u;
+            solidLeaves = (meta >> 14u) & 1u;
             vec2 lightUv = (vec2((meta >> 4u) & 15u, meta & 15u) + 0.5) / 16.0;
             colour = vec4(vColor.rgb * textureLod(Lightmap, lightUv, 0.0).rgb, vColor.a);
             #ifdef TEXTURED
@@ -77,6 +79,7 @@ public final class PlainDistantDraw {
         in vec4 colour;
         in vec3 relativePosition;
         flat in uint suppressNear;
+        flat in uint solidLeaves;
         layout(std140) uniform PlainLod { mat4 mvp; mat4 vanillaMvp; vec4 offset; };
         #ifdef TEXTURED
         uniform sampler2D LodAtlas;
@@ -101,11 +104,18 @@ public final class PlainDistantDraw {
             if (suppressNear != 0u && length(relativePosition.xz) < abs(offset.w)) discard;
             fragColour = colour;
             #ifdef TEXTURED
-            vec2 pixel = vec2(tile % 16u, tile / 16u) * 16.0 + clamp(fract(uv) * 16.0, 0.5, 15.5);
-            vec4 sampleColour = textureLod(LodAtlas, pixel / vec2(256.0, 12288.0), 0.0);
-            // Choose texture detail by projected texel footprint, so zoom and FOV remain consistent.
             float footprint = max(length(dFdx(uv) * 16.0), length(dFdy(uv) * 16.0));
             float detail = 1.0 - smoothstep(0.75, 3.0, footprint);
+            // Preserve the original repeating texture orientation.
+            vec2 repeatUv = fract(uv);
+            vec2 pixel = vec2(tile % 16u, tile / 16u) * 16.0 + clamp(repeatUv * 16.0, 0.5, 15.5);
+            vec4 sampleColour = detail > 0.0 ? textureLod(LodAtlas, pixel / vec2(256.0, 12288.0), 0.0) : average;
+            if (solidLeaves != 0u) {
+                sampleColour.rgb = mix(average.rgb, sampleColour.rgb, sampleColour.a);
+                sampleColour.a = 1.0;
+                fragColour.a = 1.0;
+            }
+            // Choose texture detail by projected texel footprint, so zoom and FOV remain consistent.
             // Preserve the cutout silhouette while it still covers enough pixels to read.  At
             // coarse distance the texel holes in leaves and other cutouts become white noise;
             // Voxy's face average is the stable representation for that footprint.
@@ -128,6 +138,8 @@ public final class PlainDistantDraw {
     private static int width, height;
     private static final int[] capacities = new int[2];
     private static final MappableRingBuffer[] passUniforms = new MappableRingBuffer[2];
+    private static List<DistantTerrainSection> waterInput, waterOrder;
+    private static double waterX, waterY, waterZ;
     private static boolean reported, failed;
     private static long nextDrawReport;
     static boolean draw(boolean opaque, List<DistantTerrainSection> sections) {
@@ -216,10 +228,18 @@ public final class PlainDistantDraw {
             var position = terrainPosition != null ? terrainPosition : mc.gameRenderer.mainCamera().position();
             float vanillaDistance = Math.max(32.0F,
                     mc.options.getEffectiveRenderDistance() * 16.0F);
-            if (!opaque) sections = sections.stream().sorted(java.util.Comparator.comparingDouble(
-                    (DistantTerrainSection s) -> -((s.x() + 64.0 - position.x) * (s.x() + 64.0 - position.x)
-                            + (s.y() + 64.0 - position.y) * (s.y() + 64.0 - position.y)
-                            + (s.z() + 64.0 - position.z) * (s.z() + 64.0 - position.z)))).toList();
+            if (!opaque) {
+                // Ordering depends on position and the section snapshot, never camera rotation.
+                if (waterInput != sections || waterX != position.x || waterY != position.y || waterZ != position.z) {
+                    waterOrder = sections.stream().sorted(java.util.Comparator.comparingDouble(
+                            (DistantTerrainSection section) -> -((section.x() + 64.0 - position.x) * (section.x() + 64.0 - position.x)
+                                    + (section.y() + 64.0 - position.y) * (section.y() + 64.0 - position.y)
+                                    + (section.z() + 64.0 - position.z) * (section.z() + 64.0 - position.z)))).toList();
+                    waterInput = sections;
+                    waterX = position.x; waterY = position.y; waterZ = position.z;
+                }
+                sections = waterOrder;
+            }
             try (var mapped = uniforms.currentBuffer().map(false, true)) {
                 var data = mapped.data();
                 for (int i = 0; i < sections.size(); i++) {
@@ -320,6 +340,7 @@ public final class PlainDistantDraw {
             passUniforms[i] = null;
             capacities[i] = 0;
         }
+        waterInput = null; waterOrder = null;
         pipeline = null;
         forgetPipelines();
         reported = false; failed = false; terrainPosition = null; nextDrawReport = 0;

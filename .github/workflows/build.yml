@@ -1,0 +1,62 @@
+# CONTRIBUTING says dev stays buildable, and main only ever holds what dev already held. This runs
+# the same gradlew build a contributor runs, so a failure here is reproducible in one command rather
+# than something only the runner knows how to provoke.
+#
+# The local check comes first and always did: a contributor runs the build before pushing, and this
+# is the same one. What the remote adds is the case the local check cannot cover, a pull request from
+# somebody whose machine nobody here has seen.
+#
+# A tag does not come through here. release.yml runs the same build itself, before it publishes, so
+# routing tags through this file as well would build the same tree twice.
+#
+# The first run on a fresh cache is slow, since ModDevGradle has to fetch Minecraft and decompile it
+# before a single source file is compiled. The cache the setup step keeps makes the later ones
+# ordinary.
+
+name: build
+
+on:
+  push:
+    # Both long-lived branches. main carries nothing dev has not already carried, so a run there is
+    # the same tree a second time; it is kept because main is what the badge and anybody arriving at
+    # the repository read, and a branch with no run of its own reads as a branch nobody checks.
+    branches: [main, dev]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# A pull request only needs its latest push checked, so a superseded run there is cancelled rather
+# than left to finish and report on a commit nobody is looking at any more. A push on one of the
+# two long-lived branches is a commit that has landed for good, and every one of those keeps its
+# own verdict: two requests merged a minute apart used to leave the first commit with a cancelled
+# run, which reads as a failure on the branch and denies that commit the check it earned.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 25
+
+      - uses: gradle/actions/setup-gradle@v4
+
+      # What this refuses is whatever build.gradle refuses on the day it runs. Naming the gates here
+      # as well would only give them a third home to drift out of step with.
+      #
+      # Once per game the tree builds for, in one job rather than a matrix: the rulesets require a
+      # check named build, and a matrix would rename it after each game. The default build comes
+      # first, so a failure there is the one the log opens on; the other games follow in the
+      # order versions/ lists them.
+      - run: ./gradlew build
+
+      - run: ./gradlew build -Pminecraft=26.3

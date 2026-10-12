@@ -43,12 +43,14 @@ final class DistantDetail {
                 out vec2 ofLodUv;
                 flat out uint ofLodTile;
                 flat out vec4 ofLodAverage;
+                flat out uint ofLodSolidLeaves;
                 """);
         source = MAIN.matcher(source).replaceAll("void ofLodPackVertex()");
         return source + "\nvoid main() {\n ofLodPackVertex();\n ofLodRawColour = " + colour + ";\n" + """
                     ofLodUv = detailUv;
                     ofLodTile = detailTile & 16383u;
                     ofLodAverage = detailAverage;
+                    ofLodSolidLeaves = (meta >> 14u) & 1u;
                 }
                 """;
     }
@@ -59,6 +61,7 @@ final class DistantDetail {
                 in vec2 ofLodUv;
                 flat in uint ofLodTile;
                 flat in vec4 ofLodAverage;
+                flat in uint ofLodSolidLeaves;
                 vec4 ofLodFactor = vec4(1.0);
                 """);
         // Keep the original varying's rank; use a mutable global for the pack's colour.
@@ -71,15 +74,20 @@ final class DistantDetail {
                     float detail = 1.0 - smoothstep(0.75, 3.0, footprint);
                     // Distant subpixel faces use their stable average without an atlas fetch.
                     if (detail > 1.0 / 255.0) {
+                        vec2 repeatUv = fract(ofLodUv);
                         vec2 pixel = vec2(ofLodTile % 16u, ofLodTile / 16u) * 16.0
-                            + clamp(fract(ofLodUv) * 16.0, 0.5, 15.5);
+                            + clamp(repeatUv * 16.0, 0.5, 15.5);
                         vec4 texel = textureLod(ofVoxyAtlas, pixel / vec2(256.0, 12288.0), 0.0);
+                        if (ofLodSolidLeaves != 0u) {
+                            texel.rgb = mix(ofLodAverage.rgb, texel.rgb, texel.a);
+                            texel.a = 1.0;
+                        }
                         // Discard before the pack can replace alpha with 1 for opaque DH terrain.
                         if (texel.a <= 1.0 / 255.0) discard;
                         ofLodFactor.rgb = mix(vec3(1.0), texel.rgb / max(ofLodAverage.rgb, vec3(1.0 / 255.0)), detail);
                         ofLodFactor.a = mix(1.0, clamp(texel.a / max(ofLodAverage.a, 1.0 / 255.0), 0.0, 1.0), detail);
                     }
-                    """ + colour + " = ofLodRawColour * ofLodFactor;\n" + """
+                    """ + colour + " = ofLodRawColour * ofLodFactor;\nif (ofLodSolidLeaves != 0u) " + colour + ".a = 1.0;\n" + """
                     ofLodPackFragment();
                 }
                 """;
