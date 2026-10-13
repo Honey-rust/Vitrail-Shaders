@@ -978,20 +978,6 @@ public final class DistantDraw extends FamilyDraw {
 		return true;
 	}
 
-	/**
-	 * Whether a pass built from this descriptor covers the depth image whole, which is what decides
-	 * that the frame's emptying may be paid as that pass's load-op.
-	 * <p>
-	 * A load-op empties the render area and not one texel outside it, where {@code clearDepthTexture}
-	 * empties the image. The two agree while the area is the screen and the image is the screen's
-	 * size, which holds because {@link ColorTargets#ensure} and {@link #ensureDepth} both read it off
-	 * {@code mainRenderTarget()} rather than off each other, the two being reached frames apart on
-	 * some roads; a frame where they disagree keeps the standalone clear rather than
-	 * leaving a margin of the last frame's far terrain for the window takes to sample.
-	 *
-	 * @param descriptor the pack's own descriptor, or null where the pass is built here instead from
-	 *                   the game's colour view, which is the image's own size by construction
-	 */
     /** Only reject left/right planes; keep vertical/far coverage for shader-deformed terrain. */
     private static boolean withinHorizontalView(Matrix4f m, DistantTerrainSection.Bounds b,
             float x, float y, float z) {
@@ -1009,6 +995,20 @@ public final class DistantDraw extends FamilyDraw {
         return !Float.isFinite(support) || support>=-0.01f;
     }
 
+	/**
+	 * Whether a pass built from this descriptor covers the depth image whole, which is what decides
+	 * that the frame's emptying may be paid as that pass's load-op.
+	 * <p>
+	 * A load-op empties the render area and not one texel outside it, where {@code clearDepthTexture}
+	 * empties the image. The two agree while the area is the screen and the image is the screen's
+	 * size, which holds because {@link ColorTargets#ensure} and {@link #ensureDepth} both read it off
+	 * {@code mainRenderTarget()} rather than off each other, the two being reached frames apart on
+	 * some roads; a frame where they disagree keeps the standalone clear rather than
+	 * leaving a margin of the last frame's far terrain for the window takes to sample.
+	 *
+	 * @param descriptor the pack's own descriptor, or null where the pass is built here instead from
+	 *                   the game's colour view, which is the image's own size by construction
+	 */
     private boolean coversDepth(RenderPassDescriptor descriptor) {
 		if (descriptor == null) {
 			return true;

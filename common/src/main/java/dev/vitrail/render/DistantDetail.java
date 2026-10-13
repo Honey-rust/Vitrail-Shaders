@@ -87,7 +87,7 @@ final class DistantDetail {
                         ofLodFactor.rgb = mix(vec3(1.0), texel.rgb / max(ofLodAverage.rgb, vec3(1.0 / 255.0)), detail);
                         ofLodFactor.a = mix(1.0, clamp(texel.a / max(ofLodAverage.a, 1.0 / 255.0), 0.0, 1.0), detail);
                     }
-                    """ + colour + " = ofLodRawColour * ofLodFactor;\nif (ofLodSolidLeaves != 0u) " + colour + ".a = 1.0;\n" + """
+                """ + colour + " = ofLodRawColour * ofLodFactor;\nif (ofLodSolidLeaves != 0u) " + colour + ".a = 1.0;\n" + """
                     ofLodPackFragment();
                 }
                 """;

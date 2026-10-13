@@ -143,8 +143,37 @@ subprojects {
 	// back and forth in one directory would recompile from nothing on every switch.
 	layout.buildDirectory = layout.projectDirectory.dir("build/mc${minecraft}")
 
-	sourceSets.main.java.srcDir("${versionSources}/java")
-	sourceSets.main.resources.srcDir("${versionSources}/resources")
+	// Version-owned files must never also compile from the legacy main tree. Use the
+	// union of supported versions so a file removed in a newer game cannot leak back in.
+	def versionOwned = [] as Set
+	file("src").eachDirMatch(~/mc.*/) { directory ->
+		fileTree(new File(directory, "java")).visit { entry ->
+			if (!entry.directory) versionOwned.add(entry.relativePath.pathString)
+		}
+	}
+	// These old mixins moved to the version-specific mixin.game package.
+	def relocatedMixins = ["GameRendererHandMixin", "IntermediaryShaderModuleMixin",
+			"ItemInHandRendererMixin", "SkyRendererMixin", "VulkanBindGroupLayoutMixin",
+			"access/IntermediaryShaderModuleAccessor", "sodium/ArenaAggregatorMixin"]
+	def sharedJava = fileTree("src/main/java") {
+		exclude(versionOwned)
+		if (project.name == "common") {
+			exclude(relocatedMixins.collect { "dev/vitrail/mixin/${it}.java" })
+		}
+	}
+	def sharedSources = tasks.register("prepareSharedSources", Sync) {
+		from(sharedJava)
+		into(layout.buildDirectory.dir("generated/sources/shared/java"))
+	}
+	sourceSets.main.java.setSrcDirs([sharedSources, "${versionSources}/java"])
+	def sharedResources = tasks.register("prepareSharedResources", Sync) {
+		from("src/main/resources") {
+			exclude { entry -> file("${versionSources}/resources/${entry.path}").isFile() }
+		}
+		inputs.files(fileTree("${versionSources}/resources"))
+		into(layout.buildDirectory.dir("generated/resources/shared"))
+	}
+	sourceSets.main.resources.setSrcDirs([sharedResources, "${versionSources}/resources"])
 
 	// A game that moved classes the shared sources name is given those sources with the names
 	// rewritten, rather than a copy of them kept by hand. versions/<version>.remap lists the moves,
@@ -195,7 +224,7 @@ subprojects {
 			// The table as rewritten, and not only the file it came from: a change to how a line of
 			// that file becomes a rewrite would otherwise leave every copy under build/ standing.
 			inputs.property("moves", moves)
-			from("src/main/java")
+			from(sharedJava)
 			into(layout.buildDirectory.dir("generated/sources/remapped/java"))
 			filteringCharset = "UTF-8"
 			filter { String line ->
