@@ -109,9 +109,11 @@ public final class PlainDistantDraw {
             vec4 sceneClip = vanillaMvp * vec4(relativePosition, 1.0);
             float sceneDepth = sceneClip.z / sceneClip.w;
             float infiniteDepth = gl_FragCoord.z;
-            gl_FragDepth = sceneDepth > 0.0
-                ? max(sceneDepth * 0.9999, 1e-12)
-                : max(infiniteDepth * 1e-7, 1e-12);
+            // Do not clamp the tail to a fixed minimum: at high altitude/distance
+            // that makes different surfaces share a depth and exposes buried faces.
+            // Both terms decrease with distance. Their maximum also joins them
+            // continuously at the finite far plane, without reversing depth order.
+            gl_FragDepth = max(sceneDepth * 0.9999, infiniteDepth * 1e-7);
             // Thin/non-cubic proxies cannot faithfully replace nearby torches and flowers.
             if (suppressNear != 0u && length(relativePosition.xz) < abs(offset.w)) discard;
             fragColour = colour;
